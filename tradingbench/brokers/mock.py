@@ -45,6 +45,7 @@ class MockBroker(Broker):
         }
         self._positions: dict[str, tuple[float, float]] = {}  # symbol -> (qty, avg price)
         self._orders: dict[str, Order] = {}
+        self._client_ids: dict[str, str] = {}  # client_order_id -> order id (idempotence)
 
     # -- market data -----------------------------------------------------
     def _price(self, symbol: str) -> float:
@@ -118,11 +119,14 @@ class MockBroker(Broker):
         *,
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
+        client_order_id: str | None = None,
     ) -> Order:
         if qty <= 0:
             raise BrokerError("qty must be positive")
         if not self._market_open:
             raise BrokerError("market is closed")
+        if client_order_id and client_order_id in self._client_ids:
+            return self.get_order(self._client_ids[client_order_id])
 
         quote = self.get_quote(symbol)
         fill_price = quote.ask if side is Side.BUY else quote.bid
@@ -141,6 +145,7 @@ class MockBroker(Broker):
                     submitted_at=datetime.now(UTC),
                 )
                 self._orders[order.id] = order
+                self._remember(order.id, client_order_id)
                 return order
             fill_price = limit_price
 
@@ -157,7 +162,12 @@ class MockBroker(Broker):
             submitted_at=datetime.now(UTC),
         )
         self._orders[order.id] = order
+        self._remember(order.id, client_order_id)
         return order
+
+    def _remember(self, order_id: str, client_order_id: str | None) -> None:
+        if client_order_id:
+            self._client_ids[client_order_id] = order_id
 
     def _apply_fill(self, symbol: str, qty: float, side: Side, price: float) -> None:
         held, avg = self._positions.get(symbol, (0.0, 0.0))

@@ -48,8 +48,15 @@ class Broker(ABC):
         *,
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
+        client_order_id: str | None = None,
     ) -> Order:
-        """Submit an order. Market orders fill immediately in paper."""
+        """Submit an order. Market orders fill immediately in paper.
+
+        `client_order_id` must be idempotent: replaying the same id returns the
+        original order instead of placing a second one. That is the last line of
+        defence against double orders after a crash between "order sent" and
+        "state saved".
+        """
 
     @abstractmethod
     def get_order(self, order_id: str) -> Order:

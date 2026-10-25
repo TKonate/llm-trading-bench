@@ -188,6 +188,7 @@ class AlpacaPaperBroker(Broker):
         *,
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
+        client_order_id: str | None = None,
     ) -> Order:
         if qty <= 0:
             raise BrokerError("qty must be positive")
@@ -198,6 +199,8 @@ class AlpacaPaperBroker(Broker):
             "type": order_type.value,
             "time_in_force": "day",
         }
+        if client_order_id:
+            body["client_order_id"] = client_order_id
         if order_type is OrderType.LIMIT:
             if limit_price is None:
                 raise BrokerError("limit orders require limit_price")

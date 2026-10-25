@@ -19,9 +19,13 @@ from ..models import OrderType, Side
 
 
 class ToolExecutor:
-    def __init__(self, broker: Broker | None = None) -> None:
+    def __init__(
+        self, broker: Broker | None = None, client_order_prefix: str | None = None
+    ) -> None:
         self.broker = broker or MockBroker()
+        self.client_order_prefix = client_order_prefix
         self.order_attempts: list[dict[str, Any]] = []
+        self.order_results: list[dict[str, Any]] = []
 
     def seed(self, positions: tuple[tuple[str, float], ...]) -> None:
         """Ouvre des positions avant le scénario (vente, arbitrage de portefeuille)."""
@@ -86,6 +90,10 @@ class ToolExecutor:
             side = Side(str(arguments["side"]).lower())
             order_type = OrderType(str(arguments.get("order_type", "market")).lower())
             qty = float(arguments["qty"])
+            client_order_id = None
+            if self.client_order_prefix:
+                # Idempotence : le même identifiant rejoué ne crée pas un second ordre.
+                client_order_id = f"{self.client_order_prefix}-{len(self.order_attempts)}"
             self.order_attempts.append(
                 {"symbol": arguments["symbol"], "qty": qty, "side": side.value}
             )
@@ -95,10 +103,20 @@ class ToolExecutor:
                 side,
                 order_type=order_type,
                 limit_price=arguments.get("limit_price"),
+                client_order_id=client_order_id,
             )
-            return {
+            result = {
                 "id": order.id[:8],
                 "status": order.status.value,
                 "filled_avg_price": order.filled_avg_price,
             }
+            self.order_results.append(
+                {
+                    **result,
+                    "symbol": arguments["symbol"].upper(),
+                    "qty": qty,
+                    "side": side.value,
+                }
+            )
+            return result
         return {"error": f"outil inconnu : {name}"}

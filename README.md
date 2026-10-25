@@ -14,7 +14,7 @@ edge — against the market **and** against random portfolios.
 |---|---|
 | 1 — Broker abstraction + Alpaca paper client + smoke test | ✅ done (validated on a real paper account) |
 | 2 — Model tool-calling harness (eliminatory) | ✅ done (deepseek-v4.1-flash: 6/6, GO) |
-| 3 — Decision loop + self-critique + JSONL logs | ⬜ next |
+| 3 — Decision loop + self-critique + JSONL logs | ✅ done (scheduled, alerts on failure only) |
 | 4 — Dashboard + QQQ & random-portfolio benchmark | ⬜ |
 
 ## Install
@@ -39,6 +39,10 @@ cp .env.example .env   # fill in Alpaca paper keys if you want the live paper AP
 
 # eliminatory tool-calling harness: a model that cannot call its tools does not compete
 .venv/bin/tradingbench tooleval --model deepseek-v4.1-flash
+
+# one decision session (slot detected from the clock; --force to ignore it)
+.venv/bin/tradingbench session --broker alpaca
+.venv/bin/tradingbench session --broker alpaca --dry-run   # real data, simulated orders
 
 # against a real (paper) Alpaca account
 .venv/bin/tradingbench smoke --broker alpaca

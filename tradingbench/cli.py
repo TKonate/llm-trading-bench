@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
+from .agent.prompts import UNIVERSE
 from .brokers import BrokerError, get_broker
 from .config import Settings
 from .harness import SCENARIOS, run_scenarios, summarize
@@ -200,6 +201,103 @@ def tooleval(
 
     if summaries and all(summary.verdict == "NO-GO" for summary in summaries):
         raise typer.Exit(code=1)
+
+
+@app.command()
+def session(
+    broker: str = typer.Option("", help="mock | alpaca (défaut : TRADING_BROKER du .env)"),
+    agent: Annotated[str | None, typer.Option(help="identifiant de l'agent (état + logs)")] = None,
+    force: bool = typer.Option(False, help="ignorer l'horloge de marché"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="ordres simulés, données réelles"),
+    budget: int = typer.Option(120_000, help="plafond de tokens par jour"),
+    max_turns: int = typer.Option(6, help="tours d'outils maximum"),
+) -> None:
+    """Exécuter une session de décision de l'agent (créneau détecté automatiquement)."""
+    from .agent import load_state, run_session, save_state
+    from .brokers.shadow import ShadowBroker
+
+    settings = _settings()
+    kind = (broker or settings.broker).strip().lower()
+    try:
+        client_broker = get_broker(kind, settings)
+    except BrokerError as exc:
+        console.print(f"[red]Broker :[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    try:
+        config = provider_from_env(dict(os.environ))
+    except ValueError as exc:
+        console.print(f"[red]LLM :[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    agent_id = agent or f"{config.model}@{kind}"
+    broker_label = kind
+    if dry_run:
+        client_broker = ShadowBroker(client_broker, UNIVERSE)
+        broker_label = f"{kind} (dry-run)"
+
+    client = ChatClient(
+        base_url=config.base_url,
+        model=config.model,
+        api_key=config.api_key,
+        session_header=config.session_header,
+        extra_headers=config.extra_headers,
+    )
+    state_path = settings.log_dir / f"state_{agent_id.replace('@', '_at_').replace('/', '_')}.json"
+    logger = JsonlLogger(settings.log_dir / f"agent_{agent_id.replace('@', '_at_')}.jsonl")
+    state = load_state(state_path, agent_id)
+
+    try:
+        outcome = run_session(
+            client_broker,
+            client,
+            state,
+            logger,
+            force=force,
+            budget_tokens=budget,
+            max_turns=max_turns,
+        )
+    finally:
+        client.close()
+        save_state(state_path, state)
+
+    if not outcome.ran:
+        console.print(
+            f"[yellow]Session non exécutée :[/yellow] {outcome.reason} "
+            f"[dim]({outcome.slot})[/dim]"
+        )
+        return
+
+    console.print(
+        f"[green]✓[/green] session {outcome.slot} · {broker_label} · {outcome.tokens} tokens"
+    )
+    if outcome.tool_calls:
+        console.print(f"[dim]outils : {', '.join(outcome.tool_calls)}[/dim]")
+    if outcome.orders:
+        table = Table(title="ordres passés")
+        table.add_column("symbole")
+        table.add_column("sens")
+        table.add_column("qté", justify="right")
+        table.add_column("statut")
+        table.add_column("prix", justify="right")
+        for order in outcome.orders:
+            price = order.get("filled_avg_price")
+            table.add_row(
+                str(order["symbol"]),
+                str(order["side"]),
+                f"{order['qty']:g}",
+                str(order["status"]),
+                f"{price:.2f}" if price else "—",
+            )
+        console.print(table)
+    else:
+        console.print("[dim]aucun ordre — l'inaction est une décision valide.[/dim]")
+    if outcome.text:
+        console.print(f"\n[italic]{outcome.text}[/italic]")
+    if outcome.critique:
+        console.print("\n[bold]Auto-critique[/bold]")
+        console.print(outcome.critique)
+    console.print(f"[dim]état : {state_path}[/dim]")
 
 
 @app.command()

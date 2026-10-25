@@ -77,6 +77,10 @@ TOOLS: list[dict[str, Any]] = [
             "qty": {"type": "number", "description": "Nombre d'actions, > 0"},
             "side": {"type": "string", "enum": ["buy", "sell"]},
             "order_type": {"type": "string", "enum": ["market", "limit"]},
+            "limit_price": {
+                "type": "number",
+                "description": "Prix limite, obligatoire si order_type=limit",
+            },
         },
         ["symbol", "qty", "side"],
     ),

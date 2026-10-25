@@ -11,7 +11,8 @@ Set ALPACA_API_KEY / ALPACA_SECRET_KEY in `.env`.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import re
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -35,6 +36,30 @@ def _dt(raw: str | None) -> datetime:
     if not raw:
         return datetime.now(UTC)
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
+_TIMEFRAME = re.compile(r"^(\d+)(Min|Hour|Day|Week|Month)$")
+
+
+def _lookback_start(timeframe: str, limit: int, now: datetime | None = None) -> datetime:
+    """Fenêtre de recherche assez large pour contenir `limit` barres utiles.
+
+    Facteur 2 + marge : un marché actions ne travaille qu'environ 5 jours sur 7,
+    et il y a les jours fériés. Trop court = moins de barres que demandé.
+    """
+    now = now or datetime.now(UTC)
+    match = _TIMEFRAME.match(timeframe)
+    if not match:
+        return now - timedelta(days=max(30, limit * 2 + 10))
+    step, unit = int(match.group(1)), match.group(2)
+    unit_delta = {
+        "Min": timedelta(minutes=step),
+        "Hour": timedelta(hours=step),
+        "Day": timedelta(days=step),
+        "Week": timedelta(weeks=step),
+        "Month": timedelta(days=30 * step),
+    }[unit]
+    return now - unit_delta * limit * 2 - timedelta(days=5)
 
 
 class AlpacaPaperBroker(Broker):
@@ -99,6 +124,11 @@ class AlpacaPaperBroker(Broker):
         )
 
     def get_bars(self, symbol: str, *, timeframe: str = "1Day", limit: int = 30) -> list[Bar]:
+        # Contraintes réelles de l'API Alpaca, vérifiées sur le compte paper :
+        #   - sans `start`, la réponse est 200 avec `bars: null` (pas d'erreur) ;
+        #   - avec `sort=asc` + `start`, on obtient les PLUS ANCIENNES barres de la fenêtre.
+        # On demande donc les plus récentes (desc) sur une fenêtre large, puis on
+        # remet dans l'ordre chronologique — c'est le contrat du Broker.
         payload = self._request(
             "GET",
             f"{self._data_url}/v2/stocks/{symbol}/bars",
@@ -107,9 +137,11 @@ class AlpacaPaperBroker(Broker):
                 "limit": limit,
                 "feed": self._feed,
                 "adjustment": "raw",
-                "sort": "asc",
+                "sort": "desc",
+                "start": _lookback_start(timeframe, limit).isoformat(),
             },
         )
+        rows = payload.get("bars") or []
         return [
             Bar(
                 symbol=symbol,
@@ -120,7 +152,7 @@ class AlpacaPaperBroker(Broker):
                 close=float(row["c"]),
                 volume=float(row["v"]),
             )
-            for row in payload.get("bars") or []
+            for row in reversed(rows)
         ]
 
     # -- account ---------------------------------------------------------

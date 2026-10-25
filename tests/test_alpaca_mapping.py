@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import httpx
 import pytest
 
-from tradingbench.brokers.alpaca_paper import AlpacaPaperBroker
+from tradingbench.brokers.alpaca_paper import AlpacaPaperBroker, _lookback_start
 from tradingbench.brokers.base import BrokerError
 from tradingbench.models import OrderStatus
 
@@ -77,3 +79,47 @@ def test_unknown_order_status_degrades_gracefully():
         )
 
     assert _broker(handler).get_order("o1").status is OrderStatus.UNKNOWN
+
+
+# -- barres : régression du bug trouvé sur le compte paper réel -----------------
+
+def test_bars_request_sends_start_and_desc():
+    """Sans `start`, Alpaca répond 200 avec bars:null. Avec asc+start, il renvoie
+    les plus ANCIENNES barres. On vérifie donc les deux paramètres."""
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        return httpx.Response(200, json={"bars": [], "symbol": "SPY"})
+
+    _broker(handler).get_bars("SPY", limit=30)
+    assert seen[0].params["sort"] == "desc"
+    assert seen[0].params["start"]
+    assert seen[0].params["limit"] == "30"
+
+
+def test_bars_are_reversed_back_to_chronological_order():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "bars": [
+                    {"t": "2026-10-23T04:00:00Z", "o": 2, "h": 2, "l": 2, "c": 2, "v": 1},
+                    {"t": "2026-10-22T04:00:00Z", "o": 1, "h": 1, "l": 1, "c": 1, "v": 1},
+                ]
+            },
+        )
+
+    bars = _broker(handler).get_bars("SPY")
+    assert [bar.close for bar in bars] == [1.0, 2.0]
+    assert bars[-1].timestamp.date().isoformat() == "2026-10-23"
+
+
+def test_lookback_window_widens_with_the_requested_limit():
+    now = datetime(2026, 10, 25, tzinfo=UTC)
+    small = _lookback_start("1Day", 10, now)
+    large = _lookback_start("1Day", 60, now)
+    assert large < small < now
+    assert (now - small).days > 10  # au moins 2 barres par jour demandé
+    # 1Hour doit produire une fenêtre en heures, pas en dizaines de jours
+    assert (now - _lookback_start("1Hour", 24, now)).days < 10

@@ -165,9 +165,13 @@ def run_session(
 
     slot_info = session_slot(now)
     if slot_info is None and not force:
-        return SessionOutcome(
+        outcome = SessionOutcome(
             agent, slot="hors-fenêtre", ran=False, reason="hors créneau ou jour non ouvré"
         )
+        # Journaliser aussi les refus : sans cette ligne, « n'a rien fait » et
+        # « n'a pas tourné » sont indistinguables dans les logs.
+        logger.log("session_skipped", agent=agent, slot=outcome.slot, reason=outcome.reason)
+        return outcome
     slot, label = slot_info if slot_info else (f"{now.date().isoformat()}:force", "forcée")
 
     if state.is_slot_done(slot):

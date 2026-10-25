@@ -195,12 +195,52 @@ def test_session_is_skipped_when_the_market_is_closed(tmp_path):
 
 
 def test_session_is_skipped_outside_the_window(tmp_path):
+    log_path = tmp_path / "a.jsonl"
     outcome = run_session(
-        MockBroker(), BuyThenStop(), AgentState(agent_id="test"), JsonlLogger(tmp_path / "a.jsonl"),
-        now=SUNDAY,
+        MockBroker(), BuyThenStop(), AgentState(agent_id="test"), JsonlLogger(log_path), now=SUNDAY
     )
     assert not outcome.ran
     assert "créneau" in outcome.reason
+    # Un refus doit laisser une trace : sinon on ne sait pas si le job a tourné.
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert events and events[-1]["event"] == "session_skipped"
+    assert "créneau" in events[-1]["reason"]
+
+
+def test_every_skip_path_is_journalised(tmp_path):
+    """Marché fermé, budget atteint, pause auto : chacun doit écrire une ligne."""
+    log_path = tmp_path / "skip.jsonl"
+    logger = JsonlLogger(log_path)
+
+    run_session(
+        MockBroker(market_open=False),
+        BuyThenStop(),
+        AgentState(agent_id="t1"),
+        logger,
+        now=MONDAY_OPEN,
+    )
+    run_session(
+        MockBroker(),
+        BuyThenStop(),
+        AgentState(agent_id="t2", tokens_spent_today=999_999, budget_day="2026-10-26"),
+        logger,
+        now=MONDAY_OPEN,
+        force=True,
+    )
+    run_session(
+        MockBroker(),
+        BuyThenStop(),
+        AgentState(agent_id="t3", consecutive_tool_failures=3),
+        logger,
+        now=MONDAY_OPEN,
+        force=True,
+    )
+    events = [json.loads(line) for line in log_path.read_text().splitlines()]
+    reasons = [event["reason"] for event in events if event["event"] == "session_skipped"]
+    assert len(reasons) == 3
+    assert any("marché fermé" in reason for reason in reasons)
+    assert any("budget" in reason for reason in reasons)
+    assert any("pause auto" in reason for reason in reasons)
 
 
 def test_token_budget_blocks_the_session(tmp_path):

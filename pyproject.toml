@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-trading-bench"
+version = "0.1.0"
+description = "Multi-agent LLM paper-trading benchmark: same tools, same data, measured honestly."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "pydantic>=2.6,<3.0",
+    "typer>=0.9,<1.0",
+    "rich>=13.0,<15.0",
+    "python-dotenv>=1.0,<2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0,<9.0", "ruff>=0.4,<1.0"]
+
+[project.scripts]
+tradingbench = "tradingbench.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["tradingbench*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -32,6 +32,7 @@ class AgentState:
     plan: str = ""
     critique_count: int = 0
     recent_trades: list[dict[str, Any]] = field(default_factory=list)
+    starting_equity_usd: float | None = None
 
     # -- sérialisation ---------------------------------------------------
     def to_dict(self) -> dict[str, Any]:
@@ -47,6 +48,7 @@ class AgentState:
             "plan": self.plan,
             "critique_count": self.critique_count,
             "recent_trades": self.recent_trades[-20:],
+            "starting_equity_usd": self.starting_equity_usd,
         }
 
     @classmethod

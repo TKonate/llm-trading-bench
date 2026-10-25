@@ -19,6 +19,7 @@ import httpx
 from ..models import (
     Account,
     Bar,
+    NewsItem,
     Order,
     OrderStatus,
     OrderType,
@@ -155,6 +156,31 @@ class AlpacaPaperBroker(Broker):
             for row in reversed(rows)
         ]
 
+    def get_news(self, symbols: list[str], *, limit: int = 5) -> list[NewsItem]:
+        if not symbols:
+            return []
+        payload = self._request(
+            "GET",
+            f"{self._data_url}/v1beta1/news",
+            params={
+                "symbols": ",".join(symbols),
+                "limit": limit,
+                "exclude_contentless": "true",
+            },
+        )
+        rows = payload.get("news") if isinstance(payload, dict) else None
+        return [
+            NewsItem(
+                timestamp=_dt(row.get("created_at")),
+                headline=str(row.get("headline") or ""),
+                summary=str(row.get("summary") or ""),
+                symbols=tuple(str(s) for s in row.get("symbols") or ()),
+                source=str(row.get("source") or ""),
+                url=str(row.get("url") or ""),
+            )
+            for row in rows or []
+        ]
+
     # -- account ---------------------------------------------------------
     def get_account(self) -> Account:
         payload = self._request("GET", f"{self._trading_url}/v2/account")
@@ -188,6 +214,8 @@ class AlpacaPaperBroker(Broker):
         *,
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
         client_order_id: str | None = None,
     ) -> Order:
         if qty <= 0:
@@ -201,6 +229,16 @@ class AlpacaPaperBroker(Broker):
         }
         if client_order_id:
             body["client_order_id"] = client_order_id
+        if stop_loss is not None or take_profit is not None:
+            # Alpaca : bracket = TP + SL, oto = une seule protection. Sur une vente,
+            # la protection n'a pas de sens (il faudrait un ordre de rachat séparé).
+            if side is Side.SELL:
+                raise BrokerError("stop_loss / take_profit ne s'appliquent qu'à un achat")
+            body["order_class"] = "bracket" if (stop_loss and take_profit) else "oto"
+            if take_profit is not None:
+                body["take_profit"] = {"limit_price": f"{round(float(take_profit), 2)}"}
+            if stop_loss is not None:
+                body["stop_loss"] = {"stop_price": f"{round(float(stop_loss), 2)}"}
         if order_type is OrderType.LIMIT:
             if limit_price is None:
                 raise BrokerError("limit orders require limit_price")

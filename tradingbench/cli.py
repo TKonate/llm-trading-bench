@@ -256,6 +256,9 @@ def session(
             force=force,
             budget_tokens=budget,
             max_turns=max_turns,
+            capital_eur=settings.starting_capital_eur,
+            eur_usd=settings.eur_usd,
+            veille_path=settings.veille_path,
         )
     finally:
         client.close()
@@ -316,6 +319,9 @@ def doctor(broker: str = typer.Option("mock", help="mock | alpaca")) -> None:
         "ALPACA_SECRET_KEY", "présent" if settings.alpaca_secret_key else "[red]absent[/red]"
     )
     table.add_row("feed", settings.alpaca_feed)
+    capital = f"{settings.starting_capital_eur:,.0f} € (≈ {settings.budget_usd:,.0f} $)"
+    table.add_row("capital de départ", capital)
+    table.add_row("veille", str(settings.veille_path or "(non configurée)"))
     table.add_row("logs", str(settings.log_dir))
     console.print(table)
     if broker.startswith("alpaca") and not settings.has_alpaca_credentials:

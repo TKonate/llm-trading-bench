@@ -15,7 +15,7 @@ edge — against the market **and** against random portfolios.
 | 1 — Broker abstraction + Alpaca paper client + smoke test | ✅ done (validated on a real paper account) |
 | 2 — Model tool-calling harness (eliminatory) | ✅ done (deepseek-v4.1-flash: 6/6, GO) |
 | 3 — Decision loop + self-critique + JSONL logs | ✅ done (scheduled, alerts on failure only) |
-| 4 — Dashboard + QQQ & random-portfolio benchmark | ⬜ |
+| 4 — Dashboard + QQQ & random-portfolio benchmark | ⬜ next |
 
 ## Install
 
@@ -73,6 +73,19 @@ mapping is what we will need anyway when the live broker arrives with different 
 
 **Logs are JSONL, append-only.** Every tool call and decision gets one line, so an agent's output can
 be replayed later. This is the raw material for the dashboard and for post-mortems.
+
+**Capital is enforced in code, not by the broker.** Alpaca has no reset-balance endpoint (404),
+so the agent's budget (1 000 € ≈ 1 080 $) is a hard notional cap inside the order executor: any buy
+that would push total exposure past the budget is refused. Fractional quantities are allowed —
+with a 1 000 € budget and a 25 % position cap, a single SPY share at ~760 $ would not fit otherwise.
+
+**Every buy can carry a stop-loss and a take-profit.** Both map to an Alpaca bracket order (a single
+one maps to OTO). The executor refuses a protection placed on the wrong side of the price: a stop
+above the market is not a stop, it is a disguised immediate sale.
+
+**News are data, not instructions.** Headlines come from Alpaca News (Benzinga) and from an optional
+Markdown brief written by another agent (Palantir). Both are injected with an explicit "untrusted
+external content" warning in the prompt, because a headline is attacker-controlled text.
 
 **The tool harness is multi-turn and executes the tools.** Judging a model on its first message would
 score myopia, not competence: a good agent checks the price *then* orders. Each scenario therefore runs

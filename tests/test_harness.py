@@ -228,7 +228,9 @@ def test_executor_places_a_real_order_on_the_mock_broker():
         executor.dispatch("place_order", {"symbol": "SPY", "qty": 1, "side": "buy"})
     )
     assert result["status"] == "filled"
-    assert executor.order_attempts == [{"symbol": "SPY", "qty": 1.0, "side": "buy"}]
+    assert executor.order_attempts == [
+        {"symbol": "SPY", "qty": 1.0, "side": "buy", "stop_loss": None, "take_profit": None}
+    ]
 
 
 def test_executor_reports_broker_errors_without_raising():
@@ -247,3 +249,76 @@ def test_executor_rejects_an_unknown_tool():
 
     payload = json.loads(ToolExecutor().dispatch("delete_everything", {}))
     assert "outil inconnu" in payload["error"]
+
+
+# -- garde-fou des protections --------------------------------------------------
+
+def test_a_stop_loss_above_the_price_is_refused():
+    import json
+
+    from tradingbench.brokers.mock import MockBroker
+    from tradingbench.harness.executor import ToolExecutor
+
+    broker = MockBroker()
+    price = broker.get_quote("SPY").mid
+    payload = json.loads(
+        ToolExecutor(broker).dispatch(
+            "place_order",
+            {"symbol": "SPY", "qty": 1, "side": "buy", "stop_loss": price + 10},
+        )
+    )
+    assert "error" in payload and "stop_loss" in payload["error"]
+
+
+def test_a_take_profit_below_the_price_is_refused():
+    import json
+
+    from tradingbench.brokers.mock import MockBroker
+    from tradingbench.harness.executor import ToolExecutor
+
+    broker = MockBroker()
+    price = broker.get_quote("SPY").mid
+    payload = json.loads(
+        ToolExecutor(broker).dispatch(
+            "place_order",
+            {"symbol": "SPY", "qty": 1, "side": "buy", "take_profit": price - 10},
+        )
+    )
+    assert "error" in payload and "take_profit" in payload["error"]
+
+
+def test_a_valid_bracket_goes_through_and_is_recorded():
+    import json
+
+    from tradingbench.brokers.mock import MockBroker
+    from tradingbench.harness.executor import ToolExecutor
+
+    broker = MockBroker()
+    price = broker.get_quote("SPY").mid
+    executor = ToolExecutor(broker)
+    payload = json.loads(
+        executor.dispatch(
+            "place_order",
+            {
+                "symbol": "SPY",
+                "qty": 1,
+                "side": "buy",
+                "stop_loss": round(price * 0.95, 2),
+                "take_profit": round(price * 1.10, 2),
+            },
+        )
+    )
+    assert payload["status"] == "filled"
+    assert executor.order_attempts[0]["stop_loss"] is not None
+    assert executor.order_attempts[0]["take_profit"] is not None
+
+
+def test_get_news_tool_returns_headlines_and_a_trust_warning():
+    import json
+
+    from tradingbench.brokers.mock import MockBroker
+    from tradingbench.harness.executor import ToolExecutor
+
+    payload = json.loads(ToolExecutor(MockBroker()).dispatch("get_news", {"symbols": ["AAPL"]}))
+    assert payload["news"][0]["headline"]
+    assert "n" in payload["note"] and "instructions" in payload["note"]

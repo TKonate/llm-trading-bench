@@ -70,16 +70,43 @@ TOOLS: list[dict[str, Any]] = [
         [],
     ),
     _fn(
+        "get_news",
+        "Dernières actualités de marché pour des symboles donnés.",
+        {
+            "symbols": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Symboles concernés, ex. [\"AAPL\",\"SPY\"]",
+            },
+            "limit": {"type": "integer", "description": "Nombre d'articles, 1-10"},
+        },
+        ["symbols"],
+    ),
+    _fn(
         "place_order",
-        "Passer un ordre au marché ou à cours limité.",
+        "Passer un ordre au marché ou à cours limité, avec protection optionnelle.",
         {
             "symbol": {"type": "string"},
-            "qty": {"type": "number", "description": "Nombre d'actions, > 0"},
+            "qty": {
+                "type": "number",
+                "description": "Nombre d'actions, > 0. Fractionnaire autorisé (ex. 0.35) "
+                "quand le prix d'une action dépasse la taille de position.",
+            },
             "side": {"type": "string", "enum": ["buy", "sell"]},
             "order_type": {"type": "string", "enum": ["market", "limit"]},
             "limit_price": {
                 "type": "number",
                 "description": "Prix limite, obligatoire si order_type=limit",
+            },
+            "stop_loss": {
+                "type": "number",
+                "description": "Prix de coupe automatique, OBLIGATOIREMENT sous le prix courant "
+                "pour un achat. Protège la position si le marché va contre toi.",
+            },
+            "take_profit": {
+                "type": "number",
+                "description": "Objectif de vente automatique, OBLIGATOIREMENT au-dessus du prix "
+                "courant pour un achat.",
             },
         },
         ["symbol", "qty", "side"],
@@ -114,6 +141,16 @@ SCENARIOS: tuple[Scenario, ...] = (
         expect_tool="place_order",
         expect_args={"symbol": "SPY", "qty": 3, "side": "buy"},
         why="ordre simple avec tous les paramètres fournis",
+    ),
+    Scenario(
+        id="fractional_buy",
+        prompt=(
+            "Achète pour environ 200 $ de SPY au marché, "
+            "avec un stop à -5 % et un objectif à +10 %."
+        ),
+        expect_tool="place_order",
+        expect_args={"symbol": "SPY", "side": "buy"},
+        why="capital réaliste : une action entière peut dépasser la taille de position",
     ),
     Scenario(
         id="sell",

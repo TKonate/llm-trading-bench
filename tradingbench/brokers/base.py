@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from ..models import Account, Bar, Order, OrderType, Position, Quote, Side
+from ..models import Account, Bar, NewsItem, Order, OrderType, Position, Quote, Side
 
 
 class BrokerError(RuntimeError):
@@ -40,6 +40,10 @@ class Broker(ABC):
         """Most recent bars, oldest first."""
 
     @abstractmethod
+    def get_news(self, symbols: list[str], *, limit: int = 5) -> list[NewsItem]:
+        """Dernières actualités pour ces symboles. Peut renvoyer une liste vide."""
+
+    @abstractmethod
     def place_order(
         self,
         symbol: str,
@@ -48,9 +52,14 @@ class Broker(ABC):
         *,
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
         client_order_id: str | None = None,
     ) -> Order:
         """Submit an order. Market orders fill immediately in paper.
+
+        `stop_loss` / `take_profit` create a protective order alongside the entry
+        (bracket when both are given). They only make sense on a buy entry.
 
         `client_order_id` must be idempotent: replaying the same id returns the
         original order instead of placing a second one. That is the last line of

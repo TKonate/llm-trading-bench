@@ -8,7 +8,7 @@ réel.
 
 from __future__ import annotations
 
-from ..models import Account, Bar, Order, OrderType, Position, Quote, Side
+from ..models import Account, Bar, NewsItem, Order, OrderType, Position, Quote, Side
 from .base import Broker
 from .mock import MockBroker
 
@@ -36,6 +36,9 @@ class ShadowBroker(Broker):
     def get_bars(self, symbol: str, *, timeframe: str = "1Day", limit: int = 30) -> list[Bar]:
         return self._real.get_bars(symbol, timeframe=timeframe, limit=limit)
 
+    def get_news(self, symbols: list[str], *, limit: int = 5) -> list[NewsItem]:
+        return self._real.get_news(symbols, limit=limit)
+
     def is_market_open(self) -> bool:
         return self._real.is_market_open()
 
@@ -54,10 +57,18 @@ class ShadowBroker(Broker):
         *,
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
         client_order_id: str | None = None,
     ) -> Order:
         return self._shadow.place_order(
-            symbol, qty, side, order_type=order_type, limit_price=limit_price
+            symbol,
+            qty,
+            side,
+            order_type=order_type,
+            limit_price=limit_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
         )
 
     def get_order(self, order_id: str) -> Order:

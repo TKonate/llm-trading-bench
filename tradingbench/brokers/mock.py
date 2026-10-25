@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from ..models import (
     Account,
     Bar,
+    NewsItem,
     Order,
     OrderStatus,
     OrderType,
@@ -88,6 +89,24 @@ class MockBroker(Broker):
             price = close
         return bars
 
+    # -- actualités ------------------------------------------------------
+    def get_news(self, symbols: list[str], *, limit: int = 5) -> list[NewsItem]:
+        """Titres fixes et déterministes : le mock ne doit jamais dépendre du réseau."""
+        items: list[NewsItem] = []
+        base = datetime(2026, 1, 14, 15, 0, tzinfo=UTC)
+        for index, symbol in enumerate(symbols[:limit]):
+            items.append(
+                NewsItem(
+                    timestamp=base - timedelta(hours=index),
+                    headline=f"{symbol} publie des résultats conformes aux attentes",
+                    summary="Communiqué de presse simulé pour les tests hors ligne.",
+                    symbols=(symbol,),
+                    source="mock",
+                    url="https://example.invalid/news",
+                )
+            )
+        return items
+
     # -- account ---------------------------------------------------------
     def get_account(self) -> Account:
         holdings = sum(qty * self._price(symbol) for symbol, (qty, _) in self._positions.items())
@@ -119,6 +138,8 @@ class MockBroker(Broker):
         *,
         order_type: OrderType = OrderType.MARKET,
         limit_price: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
         client_order_id: str | None = None,
     ) -> Order:
         if qty <= 0:
@@ -130,6 +151,14 @@ class MockBroker(Broker):
 
         quote = self.get_quote(symbol)
         fill_price = quote.ask if side is Side.BUY else quote.bid
+        if stop_loss is not None or take_profit is not None:
+            if side is Side.SELL:
+                raise BrokerError("stop_loss / take_profit ne s'appliquent qu'à un achat")
+            entry = limit_price if (order_type is OrderType.LIMIT and limit_price) else fill_price
+            if stop_loss is not None and stop_loss >= entry:
+                raise BrokerError(f"stop_loss {stop_loss} doit être sous le prix d'entrée {entry}")
+            if take_profit is not None and take_profit <= entry:
+                raise BrokerError(f"take_profit {take_profit} doit être au-dessus de {entry}")
         if order_type is OrderType.LIMIT:
             if limit_price is None:
                 raise BrokerError("limit orders require limit_price")

@@ -9,7 +9,7 @@ import pytest
 
 from tradingbench.brokers.alpaca_paper import AlpacaPaperBroker, _lookback_start
 from tradingbench.brokers.base import BrokerError
-from tradingbench.models import OrderStatus
+from tradingbench.models import OrderStatus, Side
 
 
 def _broker(handler) -> AlpacaPaperBroker:
@@ -123,3 +123,100 @@ def test_lookback_window_widens_with_the_requested_limit():
     assert (now - small).days > 10  # au moins 2 barres par jour demandé
     # 1Hour doit produire une fenêtre en heures, pas en dizaines de jours
     assert (now - _lookback_start("1Hour", 24, now)).days < 10
+
+
+# -- protection (stop-loss / take-profit) --------------------------------------
+
+def test_bracket_order_carries_both_legs():
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen.append(_json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "o1",
+                "symbol": "SPY",
+                "qty": "1",
+                "side": "buy",
+                "type": "market",
+                "status": "accepted",
+                "filled_qty": "0",
+                "filled_avg_price": None,
+                "submitted_at": "2026-10-23T20:00:00Z",
+            },
+        )
+
+    _broker(handler).place_order("SPY", 1, Side.BUY, stop_loss=700.0, take_profit=800.0)
+    body = seen[0]
+    assert body["order_class"] == "bracket"
+    assert body["stop_loss"] == {"stop_price": "700.0"}
+    assert body["take_profit"] == {"limit_price": "800.0"}
+
+
+def test_single_protection_uses_oto():
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen.append(_json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "o1",
+                "symbol": "SPY",
+                "qty": "1",
+                "side": "buy",
+                "type": "market",
+                "status": "accepted",
+                "submitted_at": "2026-10-23T20:00:00Z",
+            },
+        )
+
+    _broker(handler).place_order("SPY", 1, Side.BUY, stop_loss=700.0)
+    assert seen[0]["order_class"] == "oto"
+    assert "take_profit" not in seen[0]
+
+
+def test_protection_on_a_sell_is_refused():
+    broker = _broker(lambda request: httpx.Response(200, json={}))
+    with pytest.raises(BrokerError, match="achat"):
+        broker.place_order("SPY", 1, Side.SELL, stop_loss=700.0)
+
+
+# -- actualités ----------------------------------------------------------------
+
+def test_news_are_mapped():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["symbols"] == "AAPL,SPY"
+        return httpx.Response(
+            200,
+            json={
+                "news": [
+                    {
+                        "created_at": "2026-10-25T11:00:00Z",
+                        "headline": "Apple announce something",
+                        "summary": "Résumé.",
+                        "symbols": ["AAPL"],
+                        "source": "benzinga",
+                        "url": "https://example.invalid/a",
+                    }
+                ]
+            },
+        )
+
+    items = _broker(handler).get_news(["AAPL", "SPY"], limit=3)
+    assert len(items) == 1
+    assert items[0].headline == "Apple announce something"
+    assert items[0].symbols == ("AAPL",)
+    assert items[0].timestamp.year == 2026
+
+
+def test_news_without_symbols_makes_no_call():
+    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        raise AssertionError("aucun appel réseau attendu")
+
+    assert _broker(handler).get_news([]) == []

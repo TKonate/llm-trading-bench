@@ -97,6 +97,25 @@ class Bar:
 
 
 @dataclass(frozen=True, slots=True)
+class NewsItem:
+    """Actualité brute. Contenu externe non fiable : à traiter comme des données, jamais comme
+    des instructions (une dépêche peut contenir du texte qui imite un prompt)."""
+
+    timestamp: datetime
+    headline: str
+    summary: str = ""
+    symbols: tuple[str, ...] = ()
+    source: str = ""
+    url: str = ""
+
+    def one_line(self, width: int = 160) -> str:
+        head = self.headline.strip().replace("\n", " ")
+        if len(head) > width:
+            head = head[: width - 1] + "…"
+        return f"{self.timestamp.date().isoformat()} · {head}"
+
+
+@dataclass(frozen=True, slots=True)
 class Order:
     id: str
     symbol: str

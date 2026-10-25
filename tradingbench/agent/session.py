@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from ..brokers.base import Broker, BrokerError
@@ -109,13 +110,19 @@ def build_market_context(broker: Broker, universe: tuple[str, ...] = UNIVERSE) -
     return "\n".join(lines) if lines else "(aucune donnée de marché disponible)"
 
 
-def build_portfolio_context(broker: Broker) -> str:
+def build_portfolio_context(broker: Broker, budget_usd: float | None = None) -> str:
     try:
         account = broker.get_account()
         positions = broker.get_positions()
     except Exception as exc:  # noqa: BLE001 - idem : on dégrade, on n'interrompt pas
         return f"(portefeuille indisponible : {exc})"
     lines = [f"cash {account.cash:,.2f} {account.currency} · equity {account.equity:,.2f}"]
+    if budget_usd:
+        exposure = sum(position.market_value for position in positions)
+        share = 100 * exposure / budget_usd if budget_usd else 0.0
+        lines.append(
+            f"exposition {exposure:,.2f} $ sur un budget de {budget_usd:,.2f} $ ({share:.0f} %)"
+        )
     if not positions:
         lines.append("aucune position ouverte")
     for position in positions:
@@ -138,13 +145,63 @@ def build_history(state: AgentState) -> str:
     return "\n".join(lines)
 
 
-def format_system_prompt(strategy: str = DEFAULT_STRATEGY) -> str:
+def format_system_prompt(
+    strategy: str = DEFAULT_STRATEGY, capital_eur: float = 1000.0, eur_usd: float = 1.08
+) -> str:
+    capital_usd = capital_eur * eur_usd
+    max_position_eur = capital_eur * 0.25
     return SYSTEM_PROMPT.format(
         universe=", ".join(UNIVERSE),
         benchmark=BENCHMARK,
         strategy=strategy,
         max_positions=MAX_POSITIONS,
+        capital=f"{capital_eur:,.0f} € (≈ {capital_usd:,.0f} $, comptes en dollars)".replace(
+            ",", " "
+        ),
+        max_position=f"{max_position_eur:,.0f} €".replace(",", " "),
     )
+
+
+def build_news_context(broker: Broker, limit: int = 4) -> str:
+    """Titres récents. Marqué comme non fiable : une dépêche peut contenir du texte qui
+    imite une instruction, et l'agent ne doit pas la suivre."""
+    try:
+        items = broker.get_news(list(UNIVERSE), limit=limit)
+    except Exception as exc:  # noqa: BLE001 - l'absence d'actualités ne bloque pas la session
+        return f"(actualités indisponibles : {exc})"
+    if not items:
+        return "(aucune actualité récente sur l'univers)"
+    return "\n".join(f"- {item.one_line()}" for item in items[:limit])
+
+
+def read_veille(path: Path | None, now: datetime | None = None, max_age_days: int = 4) -> str:
+    """Veille rédigée par un tiers (Palantir). Fichier Markdown, la plus récente gagne.
+
+    L'âge est affiché : une veille de trois semaines n'a pas la même valeur qu'une veille
+    d'hier, et l'agent doit pouvoir en juger.
+    """
+    if path is None:
+        return "(aucune veille configurée — VEILLE_PATH absent du .env)"
+    candidate = Path(path)
+    if candidate.is_dir():
+        files = sorted(
+            (f for f in candidate.glob("*.md") if not f.name.startswith("_")),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if not files:
+            return f"(dossier de veille vide : {candidate})"
+        candidate = files[0]
+    if not candidate.exists():
+        return f"(pas encore de veille : {candidate} n'existe pas)"
+    age_days = ((now or datetime.now(UTC)).timestamp() - candidate.stat().st_mtime) / 86400
+    content = candidate.read_text(encoding="utf-8", errors="replace").strip()
+    if not content:
+        return f"(veille vide : {candidate.name})"
+    header = f"Source : {candidate.name}, âge {age_days:.1f} jour(s)."
+    if age_days > max_age_days:
+        header += " ⚠ VEILLE PÉRIMÉE, à ne pas traiter comme une information de marché actuelle."
+    return f"{header}\n{content[:3500]}"
 
 
 def run_session(
@@ -158,6 +215,9 @@ def run_session(
     budget_tokens: int = 120_000,
     max_turns: int = 6,
     strategy: str = DEFAULT_STRATEGY,
+    capital_eur: float = 1000.0,
+    eur_usd: float = 1.08,
+    veille_path: Path | None = None,
 ) -> SessionOutcome:
     now = now or datetime.now(UTC)
     state.roll_day(now.date())
@@ -198,18 +258,48 @@ def run_session(
         logger.log("session_skipped", agent=agent, slot=slot, reason=outcome.reason)
         return outcome
 
-    executor = ToolExecutor(broker, client_order_prefix=f"{agent}-{slot}")
+    # Le budget est une contrainte de mesure, pas une décoration : un compte paper
+    # laissé à 100 000 $ rendrait toute performance en pourcentage absurde.
+    capital_usd = round(capital_eur * eur_usd, 2)
+    try:
+        equity = broker.get_account().equity
+    except Exception as exc:  # noqa: BLE001
+        outcome = SessionOutcome(agent, slot=slot, ran=False, reason=f"compte illisible : {exc}")
+        logger.log("session_skipped", agent=agent, slot=slot, reason=outcome.reason)
+        return outcome
+    if state.starting_equity_usd is None:
+        state.starting_equity_usd = equity
+    if equity > capital_usd * 1.2:
+        # On ne bloque pas : le plafond d'exposition de l'exécuteur fait respecter le
+        # budget de 1 000 €. On garde la trace, parce que ça fausse la lecture des %.
+        logger.log(
+            "capital_warning",
+            agent=agent,
+            slot=slot,
+            account_equity=equity,
+            budget_usd=capital_usd,
+            note="compte paper au-dessus du budget : exposition plafonnée par le code",
+        )
+
+    executor = ToolExecutor(
+        broker, client_order_prefix=f"{agent}-{slot}", max_notional=capital_usd
+    )
     memory = f"TON PLAN EN COURS (auto-critique)\n{state.plan}\n\n" if state.plan else ""
     user_message = CONTEXT_TEMPLATE.format(
         slot=f"{slot} ({label})",
         now=now.strftime("%Y-%m-%d %H:%M"),
         market=build_market_context(broker),
-        portfolio=build_portfolio_context(broker),
+        news=build_news_context(broker),
+        veille=read_veille(veille_path, now),
+        portfolio=build_portfolio_context(broker, capital_usd),
         history=build_history(state),
         memory=memory,
     )
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": format_system_prompt(strategy)},
+        {
+            "role": "system",
+            "content": format_system_prompt(strategy, capital_eur, eur_usd),
+        },
         {"role": "user", "content": user_message},
     ]
 

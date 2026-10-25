@@ -12,9 +12,9 @@ edge — against the market **and** against random portfolios.
 
 | Livrable | État |
 |---|---|
-| 1 — Broker abstraction + Alpaca paper client + smoke test | ✅ done |
-| 2 — Model tool-calling harness (eliminatory) | ⬜ next |
-| 3 — Decision loop + self-critique + JSONL logs | ⬜ |
+| 1 — Broker abstraction + Alpaca paper client + smoke test | ✅ done (validated on a real paper account) |
+| 2 — Model tool-calling harness (eliminatory) | ✅ done (deepseek-v4.1-flash: 6/6, GO) |
+| 3 — Decision loop + self-critique + JSONL logs | ⬜ next |
 | 4 — Dashboard + QQQ & random-portfolio benchmark | ⬜ |
 
 ## Install
@@ -33,6 +33,12 @@ cp .env.example .env   # fill in Alpaca paper keys if you want the live paper AP
 
 # store Alpaca paper keys in .env without any editor (hidden input, then live check)
 .venv/bin/tradingbench setkeys
+
+# reuse an existing Hermes/OpenAI-compatible credential without retyping it
+.venv/bin/tradingbench importkeys --provider opencode-go
+
+# eliminatory tool-calling harness: a model that cannot call its tools does not compete
+.venv/bin/tradingbench tooleval --model deepseek-v4.1-flash
 
 # against a real (paper) Alpaca account
 .venv/bin/tradingbench smoke --broker alpaca
@@ -64,16 +70,24 @@ mapping is what we will need anyway when the live broker arrives with different 
 **Logs are JSONL, append-only.** Every tool call and decision gets one line, so an agent's output can
 be replayed later. This is the raw material for the dashboard and for post-mortems.
 
+**The tool harness is multi-turn and executes the tools.** Judging a model on its first message would
+score myopia, not competence: a good agent checks the price *then* orders. Each scenario therefore runs
+a capped tool loop (4 turns) against a mock broker, with its own portfolio — including seeded positions
+for sell scenarios. Scoring is strict: a wrong symbol, a wrong quantity or a forbidden order is a
+failure, and the model only joins the benchmark at 100 %.
+
 ## Layout
 
 ```
 tradingbench/
   brokers/    base.py (contract) · mock.py · alpaca_paper.py · __init__.py (factory)
+  llm/        client.py (OpenAI-compatible, tool calling) · providers.py
+  harness/    scenarios.py · executor.py · runner.py
   models.py   Account, Position, Quote, Bar, Order
   config.py   env-driven settings
   jsonlog.py  append-only JSONL logger
-  cli.py      `tradingbench doctor` / `smoke`
-tests/        contract tests (mock + fake Alpaca) and mapping tests
+  cli.py      doctor · smoke · setkeys · importkeys · tooleval
+tests/        61 tests: broker contract, Alpaca mapping, tool-calling scoring
 ```
 
 ## Roadmap

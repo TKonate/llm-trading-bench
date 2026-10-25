@@ -206,6 +206,14 @@ class MockBroker(Broker):
     def set_price(self, symbol: str, price: float) -> None:
         self._prices[symbol] = float(price)
 
+    def seed_position(self, symbol: str, qty: float, price: float | None = None) -> None:
+        """Ouvre une position d'avance (scénarios de vente, tests de portefeuille)."""
+        entry = float(price) if price is not None else self._price(symbol)
+        if symbol in self._prices and price is not None:
+            self._prices[symbol] = float(price)
+        self._cash -= qty * entry
+        self._positions[symbol] = (float(qty), entry)
+
 
 def seed_of(prices: dict[str, float]) -> str:
     """Stable seed derived from the initial price table."""

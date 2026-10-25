@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import typer
 from dotenv import load_dotenv
@@ -16,7 +17,10 @@ from rich.table import Table
 from . import __version__
 from .brokers import BrokerError, get_broker
 from .config import Settings
+from .harness import SCENARIOS, run_scenarios, summarize
 from .jsonlog import JsonlLogger
+from .llm import ChatClient
+from .llm.providers import from_env as provider_from_env
 from .models import OrderType, Side
 
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
@@ -94,6 +98,108 @@ def setkeys(
     from . import setkeys as setkeys_module
 
     raise typer.Exit(code=setkeys_module.run(verify=verify))
+
+
+@app.command()
+def importkeys(
+    provider: str = typer.Option("opencode-go", help="provider du magasin d'auth Hermes"),
+    auth_file: Annotated[Path | None, typer.Option(help="chemin de auth.json")] = None,
+    model: Annotated[str | None, typer.Option(help="modèle (défaut : celui du profil)")] = None,
+) -> None:
+    """Importer les identifiants LLM depuis ~/.hermes/auth.json vers .env (sans les afficher)."""
+    from .importkeys import resolve_auth_file, values_for_env
+    from .setkeys import ENV_PATH, update_env_file
+
+    source = resolve_auth_file(auth_file)
+    values = values_for_env(provider, source, model)
+    update_env_file(ENV_PATH, values)
+    console.print(f"[green]✓[/green] {provider} importé dans {ENV_PATH} (droits 600)")
+    console.print(f"  base_url : {values['LLM_BASE_URL']}")
+    console.print(f"  clé      : {values['LLM_API_KEY'][:4]}… ({len(values['LLM_API_KEY'])} car.)")
+    console.print(f"  modèle   : {values.get('LLM_MODEL', '(à renseigner)')}")
+    console.print(f"[dim]source : {source}[/dim]")
+
+
+@app.command()
+def tooleval(
+    model: Annotated[list[str] | None, typer.Option("--model", "-m", help="modèle(s)")] = None,
+    only: str = typer.Option("", help="ne lancer qu'un scénario (id exact)"),
+    log_name: str = typer.Option("tooleval.jsonl", help="fichier de log JSONL"),
+) -> None:
+    """Harnais éliminatoire : sans tool calling fiable, un modèle n'entre pas dans le benchmark."""
+    settings = _settings()
+    models = [m for m in (model or []) if m]
+    if not models:
+        models = [os.environ.get("LLM_MODEL", "")] if os.environ.get("LLM_MODEL") else []
+    if not models:
+        console.print("[red]Aucun modèle demandé.[/red] Utiliser --model <nom>.")
+        raise typer.Exit(code=2)
+
+    scenarios = tuple(s for s in SCENARIOS if not only or s.id == only)
+    if not scenarios:
+        known = ", ".join(s.id for s in SCENARIOS)
+        console.print(f"[red]Scénario inconnu :[/red] {only}. Connus : {known}")
+        raise typer.Exit(code=2)
+
+    logger = JsonlLogger(settings.log_dir / log_name)
+    all_results = []
+    for name in models:
+        try:
+            config = provider_from_env(dict(os.environ), model=name)
+        except ValueError as exc:
+            console.print(f"[red]{name} :[/red] {exc}")
+            raise typer.Exit(code=2) from exc
+        console.print(f"[dim]→ {config.describe()}[/dim]")
+        client = ChatClient(
+            base_url=config.base_url,
+            model=config.model,
+            api_key=config.api_key,
+            session_header=config.session_header,
+            extra_headers=config.extra_headers,
+        )
+        try:
+            all_results.extend(run_scenarios(client, scenarios, logger=logger))
+        finally:
+            client.close()
+
+    table = Table(title="tool calling — détail", show_lines=False)
+    table.add_column("modèle")
+    table.add_column("scénario")
+    table.add_column("état", justify="center")
+    table.add_column("outils appelés")
+    table.add_column("raison")
+    for result in all_results:
+        table.add_row(
+            result.model,
+            result.scenario_id,
+            "[green]OK[/green]" if result.ok else "[red]FAIL[/red]",
+            ", ".join(result.called) or "—",
+            result.error or result.reason,
+        )
+    console.print(table)
+
+    summary_table = Table(title="verdict (100 % requis pour participer)")
+    summary_table.add_column("modèle")
+    summary_table.add_column("réussis", justify="right")
+    summary_table.add_column("latence médiane", justify="right")
+    summary_table.add_column("tokens", justify="right")
+    summary_table.add_column("verdict", justify="center")
+    summaries = summarize(all_results)
+    for summary in summaries:
+        summary_table.add_row(
+            summary.model,
+            f"{summary.passed}/{summary.total}",
+            f"{summary.median_latency_ms:.0f} ms",
+            str(summary.total_tokens),
+            f"[green]{summary.verdict}[/green]"
+            if summary.verdict == "GO"
+            else f"[red]{summary.verdict}[/red]",
+        )
+    console.print(summary_table)
+    console.print(f"[dim]log → {logger.path}[/dim]")
+
+    if summaries and all(summary.verdict == "NO-GO" for summary in summaries):
+        raise typer.Exit(code=1)
 
 
 @app.command()

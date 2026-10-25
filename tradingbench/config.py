@@ -20,7 +20,12 @@ class Settings:
     @classmethod
     def from_env(cls, environ: dict[str, str] | None = None) -> Settings:
         env = os.environ if environ is None else environ
-        log_dir = Path(env.get("TRADING_LOG_DIR", str(PROJECT_ROOT / "logs")))
+        raw_log_dir = Path(env.get("TRADING_LOG_DIR", "logs")).expanduser()
+        # A relative path must resolve against the project, not against the
+        # caller's working directory: the CLI is launched by absolute path.
+        log_dir = (
+            raw_log_dir if raw_log_dir.is_absolute() else (PROJECT_ROOT / raw_log_dir).resolve()
+        )
         return cls(
             broker=env.get("TRADING_BROKER", "mock").strip().lower(),
             alpaca_api_key=(env.get("ALPACA_API_KEY") or "").strip() or None,

@@ -31,6 +31,9 @@ cp .env.example .env   # fill in Alpaca paper keys if you want the live paper AP
 # offline, no account, no network — proves the plumbing works
 .venv/bin/tradingbench smoke --broker mock
 
+# store Alpaca paper keys in .env without any editor (hidden input, then live check)
+.venv/bin/tradingbench setkeys
+
 # against a real (paper) Alpaca account
 .venv/bin/tradingbench smoke --broker alpaca
 .venv/bin/tradingbench smoke --broker alpaca --place-order   # also tests the order path

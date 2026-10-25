@@ -44,6 +44,16 @@ def _run(name: str, func: Callable[[], Any], describe: Callable[[Any], str]) -> 
 
 
 @app.command()
+def setkeys(
+    verify: bool = typer.Option(True, help="teste les clés juste après les avoir écrites"),
+) -> None:
+    """Enregistrer les clés Alpaca paper dans .env (saisie masquée, sans éditeur)."""
+    from . import setkeys as setkeys_module
+
+    raise typer.Exit(code=setkeys_module.run(verify=verify))
+
+
+@app.command()
 def doctor(broker: str = typer.Option("mock", help="mock | alpaca")) -> None:
     """Show configuration state without touching the network."""
     settings = Settings.from_env()

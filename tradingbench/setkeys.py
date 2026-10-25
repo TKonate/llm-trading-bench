@@ -12,6 +12,7 @@ vraiment — une clé qui « a l'air bonne » n'est pas une clé qui marche.
 from __future__ import annotations
 
 import getpass
+import os
 import stat
 from pathlib import Path
 
@@ -38,6 +39,19 @@ def update_env_file(path: Path, values: dict[str, str]) -> None:
         else:
             unset_key(str(path), key)
     path.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 600
+    _match_project_owner(path)
+
+
+def _match_project_owner(path: Path) -> None:
+    """Si on tourne en root (docker exec), aligner le propriétaire sur celui du projet.
+
+    Sans ça, .env appartient à root:root en 600 et les outils qui tournent sous
+    l'utilisateur du projet (smoke test, boucle de décision) ne peuvent plus le lire.
+    """
+    if not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    info = path.parent.stat()
+    os.chown(path, info.st_uid, info.st_gid)
 
 
 def _prompt_secret(label: str) -> str:

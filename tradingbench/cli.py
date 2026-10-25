@@ -19,10 +19,41 @@ from .config import Settings
 from .jsonlog import JsonlLogger
 from .models import OrderType, Side
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+_ENV_LOADED = False
+
+
+def _load_env() -> str | None:
+    """Charge .env sans jamais faire planter le CLI s'il est illisible.
+
+    Cas réel : `docker exec` tourne en root, écrit .env en root:600, et
+    l'utilisateur du projet ne peut plus le lire. On doit le dire clairement,
+    pas lever une PermissionError au moment de l'import.
+    """
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return None
+    _ENV_LOADED = True
+    try:
+        load_dotenv(ENV_FILE)
+    except OSError as exc:
+        return str(exc)
+    return None
+
 
 app = typer.Typer(add_completion=False, help="LLM paper-trading benchmark toolbox.")
 console = Console()
+
+
+def _settings() -> Settings:
+    problem = _load_env()
+    if problem:
+        console.print(f"[yellow].env illisible :[/yellow] {problem}")
+        console.print(
+            "[yellow]→[/yellow] docker exec hermes chown 1001:1001 "
+            "/opt/data/projects/llm-trading-bench/.env"
+        )
+    return Settings.from_env()
 
 
 @dataclass
@@ -33,11 +64,23 @@ class Check:
     detail: str
 
 
-def _run(name: str, func: Callable[[], Any], describe: Callable[[Any], str]) -> Check:
+def _run(
+    name: str,
+    func: Callable[[], Any],
+    describe: Callable[[Any], str],
+    validate: Callable[[Any], bool] | None = None,
+) -> Check:
+    """Run one check. `validate` matters: an HTTP 200 with an empty payload is
+    not a success, and reporting it as one is how broken pipelines ship."""
     started = time.perf_counter()
     try:
         value = func()
-        return Check(name, True, (time.perf_counter() - started) * 1000, describe(value))
+        elapsed = (time.perf_counter() - started) * 1000
+        ok = True if validate is None else bool(validate(value))
+        detail = describe(value)
+        if not ok:
+            detail = f"réponse inattendue — {detail}"
+        return Check(name, ok, elapsed, detail)
     except Exception as exc:  # noqa: BLE001 - a smoke test must report, not crash
         elapsed = (time.perf_counter() - started) * 1000
         return Check(name, False, elapsed, f"{type(exc).__name__}: {exc}")
@@ -56,7 +99,7 @@ def setkeys(
 @app.command()
 def doctor(broker: str = typer.Option("mock", help="mock | alpaca")) -> None:
     """Show configuration state without touching the network."""
-    settings = Settings.from_env()
+    settings = _settings()
     table = Table(
         title=f"tradingbench {__version__} — configuration",
         show_header=False,
@@ -89,7 +132,7 @@ def smoke(
     ),
 ) -> None:
     """End-to-end connectivity check against the selected broker."""
-    settings = Settings.from_env()
+    settings = _settings()
     logger = JsonlLogger(settings.log_dir / "smoke.jsonl")
     checks: list[Check] = []
 
@@ -120,6 +163,7 @@ def smoke(
             lambda: client.get_bars(symbol, limit=10),
             lambda bars: f"{len(bars)} barres · dernière clôture "
             f"{bars[-1].close:.2f} ({bars[-1].timestamp.date()})" if bars else "0 barre",
+            validate=lambda bars: len(bars) >= 2,
         )
     )
     checks.append(

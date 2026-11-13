@@ -55,8 +55,7 @@ def _settings() -> Settings:
     if problem:
         console.print(f"[yellow].env illisible :[/yellow] {problem}")
         console.print(
-            "[yellow]→[/yellow] docker exec hermes chown 1001:1001 "
-            "/opt/data/projects/llm-trading-bench/.env"
+            f"[yellow]→[/yellow] make {ENV_FILE.name} readable by the current user (chmod 600)."
         )
     return Settings.from_env()
 

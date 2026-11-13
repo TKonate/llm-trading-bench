@@ -11,7 +11,12 @@ import json
 import os
 from pathlib import Path
 
-DEFAULT_AUTH_FILE = Path("/opt/data/profiles/jarvis/auth.json")
+# Hermes stores credentials per profile. The location is resolved at runtime and
+# never hard-coded: a machine-specific absolute path has no place in a public repo.
+# Set HERMES_AUTH_JSON to point at a non-default profile.
+DEFAULT_AUTH_FILE = Path(
+    os.environ.get("HERMES_AUTH_JSON") or (Path.home() / ".hermes" / "auth.json")
+)
 
 # Les modèles par défaut ne sont pas devinés : on reprend celui du profil.
 DEFAULT_MODEL_BY_PROVIDER = {"opencode-go": "deepseek-v4.1-flash"}

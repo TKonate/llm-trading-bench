@@ -104,8 +104,38 @@ tradingbench/
   config.py   env-driven settings
   jsonlog.py  append-only JSONL logger
   cli.py      doctor · smoke · setkeys · importkeys · tooleval
-tests/        61 tests: broker contract, Alpaca mapping, tool-calling scoring
+tests/        106 tests: broker contract, Alpaca mapping, tool-calling scoring
 ```
+
+## Tests
+
+```bash
+.venv/bin/pytest        # 106 tests — no network, no credentials, no account
+.venv/bin/ruff check .  # lint (E, F, I, N, UP, B, SIM)
+```
+
+Nothing in the suite reaches the network. The Alpaca client is exercised through a fake HTTP
+transport, so request payloads, response parsing and error mapping are genuinely tested against
+recorded shapes instead of being mocked out at the `Broker` level. `MockBroker` and
+`AlpacaPaperBroker` both run the same parametrised contract suite, which is what makes swapping
+brokers a one-class change rather than a rewrite.
+
+## Limitations
+
+Honest list, so nobody over-reads a result:
+
+- **Paper trading only.** There is no live broker implementation. The project stops at the point
+  where real money would start, deliberately.
+- **One venue, one feed.** Alpaca paper, IEX free feed: partial volume and a 15-minute delay. A
+  backtest-grade dataset would be needed for any serious claim.
+- **No dashboard yet.** Livrable 4 (equity curves, ranking vs. QQQ, random-portfolio control group)
+  is not built: today the numbers come out of the JSONL logs by hand.
+- **One agent per session.** The multi-agent ranking that gives the project its name is the next
+  milestone, not a current feature.
+- **Fixed FX rate.** EUR/USD is pinned at 1.08 when the experiment starts; currency moves are
+  ignored afterwards, which is documented rather than hidden.
+- **Short observation window.** Weeks of sessions, not years. Nothing here is statistically
+  significant, and the default expectation is that no model beats the market.
 
 ## Roadmap
 
@@ -119,4 +149,6 @@ tests/        61 tests: broker contract, Alpaca mapping, tool-calling scoring
 
 ## Licence
 
-MIT.
+MIT — see [LICENSE](LICENSE).
+
+Educational project. Not financial advice.

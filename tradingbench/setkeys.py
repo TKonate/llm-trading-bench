@@ -1,12 +1,11 @@
 """Saisie des clés API sans passer par un éditeur ni par un chat.
 
-Usage (depuis l'hôte) :
-    docker exec -it <conteneur> /opt/data/projects/llm-trading-bench/.venv/bin/tradingbench setkeys
+Usage:
+    tradingbench setkeys            (from a shell where the venv is active)
 
-Les valeurs sont lues avec `getpass` (aucun écho), écrites dans .env en
-préservant les commentaires, puis le fichier est passé en 600. Un test de
-connexion est lancé juste après pour vérifier que les clés fonctionnent
-vraiment — une clé qui « a l'air bonne » n'est pas une clé qui marche.
+Values are read with `getpass` (no echo), written into .env while preserving
+comments, then the file is set to mode 600. A live connection test runs right
+after: a key that "looks right" is not a key that works.
 """
 
 from __future__ import annotations

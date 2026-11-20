@@ -1,4 +1,14 @@
-"""Textes envoyés à l'agent. Versionnés : les comparer fait partie de la mesure."""
+"""Prompt text sent to the agent. Versioned: comparing runs is part of the measure.
+
+The prompt bodies stay in French on purpose. They are the artifact under test,
+not source code: rewriting them would change what is being measured, and every
+model in a given experiment must read the exact same words. Any edit to the body
+must bump PROMPT_VERSION.
+
+What this module does not do: it does not build the context (session.py fills
+the templates) and it holds no logic, so a prompt change is always a diff in one
+flat file.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +16,8 @@ UNIVERSE = ("AAPL", "MSFT", "NVDA", "SPY")
 BENCHMARK = "SPY"
 MAX_POSITIONS = 3
 
-# Version du prompt : à changer quand on modifie le comportement, pour pouvoir
-# attribuer une différence de performance à un changement identifié.
+# Prompt version: bump it whenever the behaviour changes, so a performance
+# difference can be attributed to one identified edit.
 PROMPT_VERSION = "2026-10-25.1"
 
 DEFAULT_STRATEGY = (

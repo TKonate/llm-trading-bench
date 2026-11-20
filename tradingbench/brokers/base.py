@@ -2,6 +2,12 @@
 
 The decision loop must never import Alpaca. Swapping paper for live in phase B
 then costs one new subclass instead of a rewrite.
+
+The surface below is the whole contract: market data in, orders out. Anything
+that needs a venue-specific feature (bracket legs, feed selection, clock
+calendars) stays inside a subclass, so no caller can depend on it. Quantities
+are floats because fractional shares are allowed, and are often the only way to
+stay under a 25 % position limit when one share costs more than that.
 """
 
 from __future__ import annotations
@@ -12,7 +18,12 @@ from ..models import Account, Bar, NewsItem, Order, OrderType, Position, Quote, 
 
 
 class BrokerError(RuntimeError):
-    """Raised by any execution backend when a call cannot be completed."""
+    """Raised by any execution backend when a call cannot be completed.
+
+    One exception type for every failure mode: the executor turns it into a
+    tool result the model can read, and a taxonomy would only add branches
+    without changing what the agent does next.
+    """
 
 
 class Broker(ABC):
@@ -37,11 +48,17 @@ class Broker(ABC):
     def get_bars(
         self, symbol: str, *, timeframe: str = "1Day", limit: int = 30
     ) -> list[Bar]:
-        """Most recent bars, oldest first."""
+        """Most recent bars, oldest first.
+
+        The chronological order is part of the contract, not a convenience: the
+        agent reasons about a series, and a reversed list silently inverts every
+        trend it derives. Implementations sort, even when the API answers
+        newest-first.
+        """
 
     @abstractmethod
     def get_news(self, symbols: list[str], *, limit: int = 5) -> list[NewsItem]:
-        """Dernières actualités pour ces symboles. Peut renvoyer une liste vide."""
+        """Latest news for these symbols; an empty list is a valid answer."""
 
     @abstractmethod
     def place_order(

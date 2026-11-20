@@ -1,4 +1,4 @@
-"""Boucle de décision d'un agent (livrable 3)."""
+"""One agent's decision loop (deliverable 3)."""
 
 from __future__ import annotations
 

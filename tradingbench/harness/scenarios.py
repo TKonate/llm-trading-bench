@@ -1,12 +1,15 @@
-"""Scénarios de test du tool calling — le filtre éliminatoire du benchmark.
+"""Tool-calling test scenarios: the eliminatory filter of the benchmark.
 
-Pourquoi ce harnais existe : dans la vidéo Defend Intelligence, Mistral a passé
-une semaine à échouer ses appels d'outils (−7 % de performance, en pure friction
-d'exécution). Un modèle incapable d'appeler correctement ses outils n'est pas un
-concurrent : c'est du bruit dans les résultats.
+Why this harness exists: in the Defend Intelligence video, Mistral spent a week
+failing its tool calls (-7 % performance, pure execution friction). A model that
+cannot call its tools correctly is not a competitor, it is noise in the results.
 
-Chaque scénario teste un mode de défaillance observé dans la réalité :
-appel manquant, mauvais outil, arguments inventés, garde-fou ignoré.
+Each scenario tests a failure mode seen in practice: missing call, wrong tool,
+invented arguments, ignored guard rail. The prompts are French because they are
+part of the artifact being measured, same rule as the agent prompts.
+
+Deliberately not here: any notion of trading skill. This module only decides
+whether a model is admissible; profitability is measured elsewhere.
 """
 
 from __future__ import annotations
@@ -33,6 +36,12 @@ Réponds en français, de façon concise."""
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
+    """Build one OpenAI-style function schema.
+
+    The shape is the one every compatible provider expects; assembling it by hand
+    for each tool would be five near-identical dicts, and one typo in a key name
+    silently removes the tool from the model's view.
+    """
     return {
         "type": "function",
         "function": {
@@ -47,6 +56,8 @@ def _fn(name: str, description: str, properties: dict, required: list[str]) -> d
     }
 
 
+# Descriptions and parameter docs are French for the same reason as the prompts:
+# they are read by the model under test, and by the reader of the results.
 TOOLS: list[dict[str, Any]] = [
     _fn(
         "get_quote",
@@ -116,6 +127,16 @@ TOOLS: list[dict[str, Any]] = [
 
 @dataclass(frozen=True, slots=True)
 class Scenario:
+    """One admissibility test: a prompt, the tool call it should produce, and why.
+
+    Two shapes of expectation:
+    - `expect_tool` set: that tool must be called, and `expect_args` must match;
+    - `expect_tool` None: the right answer is to call nothing, so the scenario
+      passes unless `forbid_tool` itself was called.
+
+    `why` is documentation for whoever reads a failed run, not for the model.
+    """
+
     id: str
     prompt: str
     expect_tool: str | None = None
@@ -123,8 +144,8 @@ class Scenario:
     forbid_tool: str | None = None
     why: str = ""
     seed: tuple[tuple[str, float], ...] = ()
-    """Positions ouvertes avant le scénario. Une vente depuis un portefeuille vide
-    teste la chance du modèle, pas sa compétence."""
+    """Positions opened before the scenario. A sale from an empty portfolio tests
+    the model's luck, not its skill."""
 
 
 SCENARIOS: tuple[Scenario, ...] = (
@@ -186,11 +207,22 @@ SCENARIOS: tuple[Scenario, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class Outcome:
+    """Verdict for one scenario. `reason` is read by a human, not by the model."""
+
     ok: bool
     reason: str
 
 
 def _args_match(expected: dict[str, Any], actual: dict[str, Any]) -> tuple[bool, str]:
+    """Check that every expected argument is present and equal.
+
+    Three deliberate asymmetries: extra arguments in `actual` are accepted
+    (the model may pass a limit nobody asked for), strings compare
+    case-insensitively (a symbol is not a password), and numbers compare with a
+    1e-9 tolerance so 3 and 3.0 are the same quantity. Anything else must be
+    equal, including a missing key, which is reported as missing rather than
+    mismatched.
+    """
     for key, wanted in expected.items():
         if key not in actual:
             return False, f"argument « {key} » manquant"
@@ -207,7 +239,12 @@ def _args_match(expected: dict[str, Any], actual: dict[str, Any]) -> tuple[bool,
 
 
 def score(scenario: Scenario, calls: list[ToolCall]) -> Outcome:
-    """Évalue une réponse. Volontairement strict : un faux positif ici fausse tout le classement."""
+    """Judge one answer. Deliberately strict: a false positive here skews the ranking.
+
+    A forbidden tool is checked first, then the no-tool scenarios, then the
+    expected tool. Only the *first* call to the expected tool is judged: a later
+    retry with better arguments does not undo the first attempt.
+    """
     if scenario.forbid_tool and any(call.name == scenario.forbid_tool for call in calls):
         return Outcome(False, f"outil interdit appelé ({scenario.forbid_tool})")
 

@@ -1,9 +1,15 @@
-"""Broker « fantôme » pour les répétitions à blanc.
+"""Ghost broker for dry runs.
 
-Lecture → broker réel (prix et portefeuille vrais). Écriture → simulation locale
-initialisée avec l'état réel. On peut ainsi dérouler une session complète avec
-des données de marché authentiques sans toucher au compte paper, ni au futur compte
-réel.
+Reads go to the real broker (true prices and portfolio); writes go to a local
+simulation seeded with the real state. A full session can therefore run on
+authentic market data without touching the paper account, or the future live
+one.
+
+What it deliberately gives up: the shadow ledger is rebuilt at construction and
+never reconciled with the real account again, so a position closed on the real
+side during the run is still open here. `client_order_id` is not forwarded
+either, because deduplication lives in the shadow's memory, which dies with the
+process.
 """
 
 from __future__ import annotations
@@ -20,16 +26,19 @@ class ShadowBroker(Broker):
     def __init__(self, real: Broker, symbols: tuple[str, ...]) -> None:
         self._real = real
         account = real.get_account()
+        # The mock starts from the real cash balance and the real entry prices,
+        # which is what makes its exposure comparable to the real one.
         self._shadow = MockBroker(symbols=symbols, cash=account.cash)
         for position in real.get_positions():
             self._shadow.seed_position(position.symbol, position.qty, position.avg_entry_price)
         for symbol in symbols:
             try:
+                # Mid, not last: it is the only price both sides agree on, and
+                # it keeps the simulation from starting with a phantom gain.
                 self._shadow.set_price(symbol, real.get_quote(symbol).mid)
-            except Exception:  # noqa: BLE001 - un symbole indisponible ne bloque pas la répétition
+            except Exception:  # noqa: BLE001 - a dead symbol must not block a rehearsal
                 continue
 
-    # lectures réelles
     def get_quote(self, symbol: str) -> Quote:
         return self._real.get_quote(symbol)
 
@@ -42,8 +51,8 @@ class ShadowBroker(Broker):
     def is_market_open(self) -> bool:
         return self._real.is_market_open()
 
-    # écritures simulées
     def get_account(self) -> Account:
+        """Simulated account, not the real one: a rehearsal shows its own fills."""
         return self._shadow.get_account()
 
     def get_positions(self) -> list[Position]:

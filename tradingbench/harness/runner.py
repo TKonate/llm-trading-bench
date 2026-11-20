@@ -1,4 +1,9 @@
-"""Exécution du harnais et agrégation des résultats."""
+"""Run the harness and aggregate its results.
+
+The runner owns the multi-turn loop and the per-model summary. It deliberately
+computes no score of its own: pass/fail comes from `scenarios.score`, so the
+admissibility rule lives in one place and a reader can audit it.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +18,12 @@ from .scenarios import SCENARIOS, SYSTEM_PROMPT, TOOLS, Scenario, score
 
 
 class Completer(Protocol):
+    """The slices of ChatClient the runner needs.
+
+    Declared here rather than imported as ChatClient so a test double (or a
+    recorded transcript) can be scored without an HTTP layer.
+    """
+
     model: str
 
     def complete(self, messages, *, tools=None, temperature=0.0, max_tokens=800) -> Completion: ...
@@ -20,6 +31,12 @@ class Completer(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ScenarioResult:
+    """Outcome of one scenario for one model, ready to be logged or tabulated.
+
+    `error` set means the call itself failed, which is distinct from a wrong
+    answer: both are `ok=False`, but only the first is the harness's problem.
+    """
+
     model: str
     scenario_id: str
     ok: bool
@@ -52,12 +69,16 @@ def run_scenarios(
     max_turns: int = 4,
     executor_factory: Callable[[], ToolExecutor] = ToolExecutor,
 ) -> list[ScenarioResult]:
-    """Exécute chaque scénario, outils réellement appelés, sur plusieurs tours.
+    """Run every scenario, with the tools actually called, over several turns.
 
-    Un agent consulte le prix avant de décider : on lui laisse le temps de le
-    faire, sinon on mesure la réactivité du modèle au premier token, pas sa
-    capacité à mener une tâche. Chaque scénario a son propre broker : les
-    positions d'un scénario ne contaminent pas le suivant.
+    An agent reads the price before deciding, so it is given the time to do so;
+    otherwise the harness measures first-token reactivity, not task ability.
+    Each scenario gets its own broker, so the positions of one cannot contaminate
+    the next.
+
+    `latency` and `tokens` accumulate over all turns of a scenario, not per turn:
+    the cost of an answer includes the detour through the tools, which is
+    precisely what a model that needs three calls pays for.
     """
     results: list[ScenarioResult] = []
     for scenario in scenarios:
@@ -90,7 +111,7 @@ def run_scenarios(
                             "content": executor.dispatch(call.name, call.arguments),
                         }
                     )
-        except Exception as exc:  # noqa: BLE001 - un modèle cassé est un résultat
+        except Exception as exc:  # noqa: BLE001 - a broken model is a result
             result = ScenarioResult(
                 model=getattr(client, "model", "?"),
                 scenario_id=scenario.id,
@@ -119,6 +140,7 @@ def run_scenarios(
 
 
 def _assistant_message(completion: Completion) -> dict:
+    """Replay the assistant turn in the transcript, with the raw argument strings."""
     return {
         "role": "assistant",
         "content": completion.text or "",
@@ -135,6 +157,8 @@ def _assistant_message(completion: Completion) -> dict:
 
 @dataclass(frozen=True, slots=True)
 class Summary:
+    """Per-model aggregate. `total` counts scenarios, not turns."""
+
     model: str
     passed: int
     total: int
@@ -147,11 +171,19 @@ class Summary:
 
     @property
     def verdict(self) -> str:
-        """Éliminatoire : en dessous de 100 %, le modèle ne participe pas au benchmark."""
+        """Eliminatory: below 100 %, the model does not join the benchmark."""
         return "GO" if self.passed == self.total else "NO-GO"
 
 
 def summarize(results: list[ScenarioResult]) -> list[Summary]:
+    """Aggregate per model, ordered by pass rate then by speed.
+
+    The "median" is the middle element of the sorted latencies, i.e. the upper
+    median for an even count, not the average of the two middle values: the
+    figure is compared across models, not used in a statistical test. Scenarios
+    that errored are excluded from the latency sample, because a timeout is not a
+    latency.
+    """
     by_model: dict[str, list[ScenarioResult]] = {}
     for result in results:
         by_model.setdefault(result.model, []).append(result)

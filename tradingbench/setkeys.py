@@ -1,11 +1,13 @@
-"""Saisie des clés API sans passer par un éditeur ni par un chat.
+"""Write Alpaca paper keys into `.env` without an editor and without a chat.
 
-Usage:
-    tradingbench setkeys            (from a shell where the venv is active)
+Usage: `tradingbench setkeys`, from a shell where the venv is active.
 
-Values are read with `getpass` (no echo), written into .env while preserving
-comments, then the file is set to mode 600. A live connection test runs right
-after: a key that "looks right" is not a key that works.
+Values are read with `getpass` (no echo), written into `.env` while preserving
+comments, then the file is set to mode 600, and finally a live connection test
+runs: a key that "looks right" is not a key that works.
+
+Deliberately no keyring, no encryption and no backup copy: the point of the
+mode-600 `.env` is that the secret has exactly one home on this machine.
 """
 
 from __future__ import annotations
@@ -21,6 +23,11 @@ ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
 
 def mask(value: str) -> str:
+    """Render a secret as enough to recognise it, never enough to reuse it.
+
+    Eight characters or fewer are masked entirely: keeping a prefix and a
+    suffix would leave most of a short key on screen.
+    """
     if not value:
         return "(vide)"
     if len(value) <= 8:
@@ -29,7 +36,11 @@ def mask(value: str) -> str:
 
 
 def update_env_file(path: Path, values: dict[str, str]) -> None:
-    """Écrit des paires clé/valeur dans un fichier .env sans perdre les commentaires."""
+    """Write key/value pairs into a .env file without losing its comments.
+
+    An empty value means "remove the key" rather than "set it to empty", so a
+    cleared credential cannot survive as a blank line that later looks set.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     path.touch(exist_ok=True)
     for key, value in values.items():
@@ -42,10 +53,10 @@ def update_env_file(path: Path, values: dict[str, str]) -> None:
 
 
 def _match_project_owner(path: Path) -> None:
-    """Si on tourne en root (docker exec), aligner le propriétaire sur celui du projet.
+    """Re-own the file to the project's user when running as root (docker exec).
 
-    Sans ça, .env appartient à root:root en 600 et les outils qui tournent sous
-    l'utilisateur du projet (smoke test, boucle de décision) ne peuvent plus le lire.
+    Without this, .env belongs to root:root in 600 and every tool running as the
+    project user (smoke test, decision loop) loses the ability to read it.
     """
     if not hasattr(os, "geteuid") or os.geteuid() != 0:
         return
@@ -54,6 +65,12 @@ def _match_project_owner(path: Path) -> None:
 
 
 def _prompt_secret(label: str) -> str:
+    """Read one secret from the terminal, refusing anything that looks truncated.
+
+    getpass raises EOFError when stdin is not a TTY, which is the common case
+    behind a `docker exec` without `-i`; the message says so instead of letting
+    an empty key be written.
+    """
     try:
         value = getpass.getpass(f"{label} : ")
     except (EOFError, OSError):
@@ -70,6 +87,12 @@ def _prompt_secret(label: str) -> str:
 
 
 def run(verify: bool = True) -> int:
+    """Prompt for both keys, persist them, and optionally prove they work.
+
+    Returns the process exit code: 0 when the keys were written (and verified),
+    1 when the connection test failed. The keys are kept in that case, so the
+    user can fix the account without re-typing them.
+    """
     print("Clés API Alpaca PAPER (https://app.alpaca.markets → Paper Trading → API Keys)")
     print("Ce que tu tapes ne s'affiche pas et n'est envoyé nulle part.\n")
     api_key = _prompt_secret("ALPACA_API_KEY")
@@ -86,6 +109,8 @@ def run(verify: bool = True) -> int:
 
     print("\nTest de connexion au compte paper…")
     try:
+        # Deferred import: writing keys needs no broker, and httpx plus the
+        # broker stack should not be paid for by a `--no-verify` run.
         from .brokers.alpaca_paper import AlpacaPaperBroker
 
         client = AlpacaPaperBroker(api_key=api_key, secret_key=secret_key)

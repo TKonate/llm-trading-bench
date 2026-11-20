@@ -1,4 +1,4 @@
-"""Broker factory — the only place that knows which backends exist."""
+"""Broker factory: the only place that knows which backends exist."""
 
 from __future__ import annotations
 
@@ -11,6 +11,13 @@ __all__ = ["AlpacaPaperBroker", "Broker", "BrokerError", "MockBroker", "get_brok
 
 
 def get_broker(kind: str, settings: Settings | None = None) -> Broker:
+    """Instantiate a backend by its short name.
+
+    The aliases exist so that `TRADING_BROKER` can be written the way a human
+    says it ("paper", "alpaca-paper") without the CLI having to normalise it.
+    An unknown name raises instead of defaulting to mock: a typo must not turn
+    a live-data run into a synthetic one that looks plausible.
+    """
     settings = settings or Settings.from_env()
     if kind == "mock":
         return MockBroker()

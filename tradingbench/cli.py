@@ -1,4 +1,12 @@
-"""Command line entry point: `tradingbench doctor` / `tradingbench smoke`."""
+"""Command line entry point: `tradingbench doctor` / `tradingbench smoke`.
+
+Typer application, one function per command. Each command resolves what it
+needs (settings, broker, provider) here and passes it down as an argument, so
+the modules underneath receive their configuration instead of reaching for it.
+
+The command docstrings and option helps are user-facing and stay in French: they
+are the CLI's own output, not commentary on the code.
+"""
 
 from __future__ import annotations
 
@@ -25,15 +33,17 @@ from .llm.providers import from_env as provider_from_env
 from .models import OrderType, Side
 
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+# The .env is loaded once per process: a chain of commands in the same process
+# must not re-read it, and the unreadable-file warning must not repeat.
 _ENV_LOADED = False
 
 
 def _load_env() -> str | None:
-    """Charge .env sans jamais faire planter le CLI s'il est illisible.
+    """Load .env without ever crashing the CLI when it is unreadable.
 
-    Cas réel : `docker exec` tourne en root, écrit .env en root:600, et
-    l'utilisateur du projet ne peut plus le lire. On doit le dire clairement,
-    pas lever une PermissionError au moment de l'import.
+    Real case: `docker exec` runs as root, writes .env as root:600, and the
+    project user can no longer read it. That has to be said plainly, not raised
+    as a PermissionError in the middle of a command.
     """
     global _ENV_LOADED
     if _ENV_LOADED:
@@ -51,6 +61,7 @@ console = Console()
 
 
 def _settings() -> Settings:
+    """Settings for one command, with the unreadable-.env case reported once."""
     problem = _load_env()
     if problem:
         console.print(f"[yellow].env illisible :[/yellow] {problem}")
@@ -62,6 +73,8 @@ def _settings() -> Settings:
 
 @dataclass
 class Check:
+    """One smoke-test check: what ran, whether it passed, how long it took."""
+
     name: str
     ok: bool
     ms: float
@@ -130,11 +143,15 @@ def tooleval(
     settings = _settings()
     models = [m for m in (model or []) if m]
     if not models:
+        # Falling back to LLM_MODEL is what makes `tooleval` usable right after
+        # `importkeys`, without repeating the model name on the command line.
         models = [os.environ.get("LLM_MODEL", "")] if os.environ.get("LLM_MODEL") else []
     if not models:
         console.print("[red]Aucun modèle demandé.[/red] Utiliser --model <nom>.")
         raise typer.Exit(code=2)
 
+    # `--only` is an exact id match, not a substring: a typo must fail loudly
+    # instead of silently running a scenario nobody asked for.
     scenarios = tuple(s for s in SCENARIOS if not only or s.id == only)
     if not scenarios:
         known = ", ".join(s.id for s in SCENARIOS)
@@ -160,6 +177,8 @@ def tooleval(
         try:
             all_results.extend(run_scenarios(client, scenarios, logger=logger))
         finally:
+            # Closed even when a scenario blows up: an httpx client holds its
+            # sockets open, and one run can compare several models in a row.
             client.close()
 
     table = Table(title="tool calling — détail", show_lines=False)
@@ -199,6 +218,8 @@ def tooleval(
     console.print(f"[dim]log → {logger.path}[/dim]")
 
     if summaries and all(summary.verdict == "NO-GO" for summary in summaries):
+        # Non-zero only when no model qualified: one GO is a usable result, and
+        # a cron job must not treat "some models failed" as "the run failed".
         raise typer.Exit(code=1)
 
 
@@ -224,14 +245,19 @@ def session(
         raise typer.Exit(code=2) from exc
 
     try:
+        # No explicit model here: a session always runs on the configured model,
+        # because its prompt version and its state file are tied to it.
         config = provider_from_env(dict(os.environ))
     except ValueError as exc:
         console.print(f"[red]LLM :[/red] {exc}")
         raise typer.Exit(code=2) from exc
 
+    # The agent id keys both the state file and the log, and it embeds the
+    # broker: the same model on mock and on Alpaca are two experiments.
     agent_id = agent or f"{config.model}@{kind}"
     broker_label = kind
     if dry_run:
+        # Reads stay real, writes go to the shadow ledger: see ShadowBroker.
         client_broker = ShadowBroker(client_broker, UNIVERSE)
         broker_label = f"{kind} (dry-run)"
 
@@ -242,6 +268,9 @@ def session(
         session_header=config.session_header,
         extra_headers=config.extra_headers,
     )
+    # `@` and `/` are legal in a model id and hostile in a filename: they are
+    # rewritten rather than rejected, so a model name never has to be escaped by
+    # hand before starting an experiment.
     state_path = settings.log_dir / f"state_{agent_id.replace('@', '_at_').replace('/', '_')}.json"
     logger = JsonlLogger(settings.log_dir / f"agent_{agent_id.replace('@', '_at_')}.jsonl")
     state = load_state(state_path, agent_id)
@@ -260,6 +289,8 @@ def session(
             veille_path=settings.veille_path,
         )
     finally:
+        # The state is saved even when the session raised: tokens spent and
+        # failed tool calls are exactly what a crash must not lose.
         client.close()
         save_state(state_path, state)
 
@@ -329,6 +360,8 @@ def doctor(broker: str = typer.Option("mock", help="mock | alpaca")) -> None:
             "Paper Trading → API Keys. Puis renseigner .env "
             "(ne jamais coller les clés dans un chat)."
         )
+        # Exit 2, not 1: nothing was checked, so this is a configuration error
+        # rather than a failed check.
         raise typer.Exit(code=2)
 
 
@@ -372,6 +405,8 @@ def smoke(
             lambda: client.get_bars(symbol, limit=10),
             lambda bars: f"{len(bars)} barres · dernière clôture "
             f"{bars[-1].close:.2f} ({bars[-1].timestamp.date()})" if bars else "0 barre",
+            # A single bar is what a truncated window returns; two prove the
+            # lookback is wide enough and the chronological order held.
             validate=lambda bars: len(bars) >= 2,
         )
     )
@@ -387,6 +422,9 @@ def smoke(
         quote = client.get_quote(symbol)
 
         def _roundtrip() -> str:
+            # Half the mid, i.e. a limit that cannot cross: the order rests, so
+            # the test exercises submit -> cancel -> read without ever buying
+            # anything. A crossing limit would fill and spend real paper money.
             order = client.place_order(
                 symbol,
                 1,

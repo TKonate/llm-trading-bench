@@ -1,11 +1,15 @@
-"""Une session de décision : contexte → outils → ordres → journal → critique.
+"""One decision session: context, tools, orders, journal, critique.
 
-Invariants tenus ici :
-- une session déjà exécutée ne rejoue pas (clé = date + créneau) ;
-- chaque ordre porte un `client_order_id` déterministe (double envoi impossible) ;
-- le budget de tokens du jour est vérifié *avant* l'appel, pas après ;
-- trois échecs d'outils consécutifs mettent l'agent en pause ;
-- tout est journalisé en JSONL, y compris les décisions de ne rien faire.
+Invariants held here:
+- a session already run does not run again (key = date + slot);
+- every order carries a deterministic `client_order_id`, so a double submit is
+  impossible even if the process dies between "order sent" and "state saved";
+- the day's token budget is checked before the call, never after;
+- three consecutive tool failures pause the agent;
+- everything is journaled as JSONL, including the decision to do nothing.
+
+Deliberately not here: order sizing and risk limits (the executor enforces the
+capital cap), and any knowledge of Alpaca (that stays behind the Broker).
 """
 
 from __future__ import annotations
@@ -33,7 +37,12 @@ from .prompts import (
 )
 from .state import AgentState
 
-OPEN_HOURS = range(13, 16)  # 13:30–20:00 UTC en heure d'été US ; on vise l'ouverture
+# UTC hour windows for the two daily sessions. They assume US summer time
+# (EDT), where the session runs 13:30-20:00 UTC; in winter the real session
+# starts and ends an hour later, so a window can fire outside it. The clock
+# check in run_session is the authority; these ranges only keep the two runs
+# apart within a day.
+OPEN_HOURS = range(13, 16)
 CLOSE_HOURS = range(17, 21)
 MAX_TOOL_FAILURES = 3
 CRITIQUE_EVERY = 5
@@ -41,6 +50,13 @@ CRITIQUE_EVERY = 5
 
 @dataclass(slots=True)
 class SessionOutcome:
+    """What one session did, whether it ran or not.
+
+    `ran=False` with a `reason` is a first-class result: a skipped session is a
+    measurement too, and the caller has to be able to tell "chose not to trade"
+    from "never executed".
+    """
+
     agent: str
     slot: str
     ran: bool
@@ -53,7 +69,12 @@ class SessionOutcome:
 
 
 def session_slot(now: datetime) -> tuple[str, str] | None:
-    """Créneau de la session courante, ou None hors fenêtre. Jours ouvrables uniquement."""
+    """Current session slot, or None outside the windows. Weekdays only.
+
+    Returns `(key, label)`: the key is what `AgentState.slots_done` stores, so it
+    must be stable under a re-run and unique per day and per slot. The label is
+    for the prompt and is not used for deduplication.
+    """
     now = now.astimezone(UTC)
     if now.weekday() >= 5:
         return None
@@ -65,19 +86,28 @@ def session_slot(now: datetime) -> tuple[str, str] | None:
 
 
 def _pct_change(values: list[float], window: int) -> float | None:
+    """Percent change over `window` bars, or None when the history is too short.
+
+    None rather than 0.0: the caller omits the figure from the prompt instead of
+    telling the agent that a series it has never seen moved by zero.
+    """
     if len(values) <= window or values[-window - 1] == 0:
         return None
     return (values[-1] / values[-window - 1] - 1) * 100
 
 
+# Above 2 % of the mid, a spread no longer describes a liquid equity quote: it
+# is a stale or crossed book, and the session prints a warning instead of a
+# price the agent might trade on. Observed on real data outside trading hours.
 MAX_TRADABLE_SPREAD_BPS = 200.0
 
 
 def _quote_line(symbol: str, quote, closes: list[float]) -> str:
-    """Décrit une cotation — et refuse de présenter comme tradable ce qui ne l'est pas.
+    """Describe one quote, and refuse to present as tradable what is not.
 
-    Constaté sur de vraies données hors séance : ask à 0,00 et spreads à 1 000 bps.
-    Un agent qui lit ça comme un prix tradable prend une décision destructrice.
+    Seen on real off-hours data: an ask at 0.00 and spreads around 1 000 bps. An
+    agent that reads that as a tradable price takes a destructive decision, so
+    the line says "do not trade" instead of letting the model infer it.
     """
     if quote.bid <= 0 or quote.ask <= 0 or quote.ask < quote.bid:
         return (
@@ -98,12 +128,19 @@ def _quote_line(symbol: str, quote, closes: list[float]) -> str:
 
 
 def build_market_context(broker: Broker, universe: tuple[str, ...] = UNIVERSE) -> str:
+    """One line per symbol: quote, weekly and monthly change, spread.
+
+    25 bars are requested because the monthly change needs 21 closes. A symbol
+    that fails is reported as unavailable and the loop continues: a single dead
+    ticker must not cancel the session, and the agent has to see the gap rather
+    than a shorter universe.
+    """
     lines: list[str] = []
     for symbol in universe:
         try:
             quote = broker.get_quote(symbol)
             closes = [bar.close for bar in broker.get_bars(symbol, limit=25)]
-        except Exception as exc:  # noqa: BLE001 - un symbole muet ne doit pas annuler la session
+        except Exception as exc:  # noqa: BLE001 - one dead symbol must not kill it
             lines.append(f"- {symbol} : donnée indisponible ({exc})")
             continue
         lines.append(_quote_line(symbol, quote, closes))
@@ -111,10 +148,18 @@ def build_market_context(broker: Broker, universe: tuple[str, ...] = UNIVERSE) -
 
 
 def build_portfolio_context(broker: Broker, budget_usd: float | None = None) -> str:
+    """Cash, equity, exposure against the reference budget, and open positions.
+
+    `budget_usd` is optional because the same function serves the prompt (where
+    the agent must see how much of its budget is used) and the self-critique
+    (where only equity and P&L matter). Exposure over the budget is shown, not
+    clamped: the executor is what refuses the order, and the agent has to see
+    the real state.
+    """
     try:
         account = broker.get_account()
         positions = broker.get_positions()
-    except Exception as exc:  # noqa: BLE001 - idem : on dégrade, on n'interrompt pas
+    except Exception as exc:  # noqa: BLE001 - same rule: degrade, never abort
         return f"(portefeuille indisponible : {exc})"
     lines = [f"cash {account.cash:,.2f} {account.currency} · equity {account.equity:,.2f}"]
     if budget_usd:
@@ -134,6 +179,11 @@ def build_portfolio_context(broker: Broker, budget_usd: float | None = None) -> 
 
 
 def build_history(state: AgentState) -> str:
+    """The last five decisions, so the agent can stay consistent with its own plan.
+
+    Five is one critique window (CRITIQUE_EVERY): the trades the next critique
+    will comment on are the ones shown here.
+    """
     if not state.recent_trades:
         return "(aucun ordre passé pour l'instant)"
     lines = []
@@ -148,6 +198,12 @@ def build_history(state: AgentState) -> str:
 def format_system_prompt(
     strategy: str = DEFAULT_STRATEGY, capital_eur: float = 1000.0, eur_usd: float = 1.08
 ) -> str:
+    """Fill the system prompt with the capital figures the agent must respect.
+
+    0.25 is the position cap the prose states as "25 % du capital": the two have
+    to be edited together, or the agent is told one limit and measured against
+    another. Thousands are separated by a space because the prompt is French.
+    """
     capital_usd = capital_eur * eur_usd
     max_position_eur = capital_eur * 0.25
     return SYSTEM_PROMPT.format(
@@ -163,11 +219,14 @@ def format_system_prompt(
 
 
 def build_news_context(broker: Broker, limit: int = 4) -> str:
-    """Titres récents. Marqué comme non fiable : une dépêche peut contenir du texte qui
-    imite une instruction, et l'agent ne doit pas la suivre."""
+    """Recent headlines, marked untrusted in the template that receives them.
+
+    A wire story can contain text that imitates an instruction; the label is
+    what tells the agent to read it as data and to ignore it as an order.
+    """
     try:
         items = broker.get_news(list(UNIVERSE), limit=limit)
-    except Exception as exc:  # noqa: BLE001 - l'absence d'actualités ne bloque pas la session
+    except Exception as exc:  # noqa: BLE001 - missing news must not block the session
         return f"(actualités indisponibles : {exc})"
     if not items:
         return "(aucune actualité récente sur l'univers)"
@@ -175,10 +234,13 @@ def build_news_context(broker: Broker, limit: int = 4) -> str:
 
 
 def read_veille(path: Path | None, now: datetime | None = None, max_age_days: int = 4) -> str:
-    """Veille rédigée par un tiers (Palantir). Fichier Markdown, la plus récente gagne.
+    """Third-party intelligence note, from a Markdown file; the most recent wins.
 
-    L'âge est affiché : une veille de trois semaines n'a pas la même valeur qu'une veille
-    d'hier, et l'agent doit pouvoir en juger.
+    With a directory, files whose name starts with `_` are skipped and the
+    newest by mtime is used. The age is printed because a three-week-old note is
+    not the same input as yesterday's, and the agent has to be able to judge it.
+    Content is capped at 3 500 characters: this block competes with the portfolio
+    for the context window.
     """
     if path is None:
         return "(aucune veille configurée — VEILLE_PATH absent du .env)"
@@ -195,6 +257,8 @@ def read_veille(path: Path | None, now: datetime | None = None, max_age_days: in
     if not candidate.exists():
         return f"(pas encore de veille : {candidate} n'existe pas)"
     age_days = ((now or datetime.now(UTC)).timestamp() - candidate.stat().st_mtime) / 86400
+    # `errors="replace"`: a hand-edited file can carry a stray byte, and a
+    # decoding error here would cost the whole session.
     content = candidate.read_text(encoding="utf-8", errors="replace").strip()
     if not content:
         return f"(veille vide : {candidate.name})"
@@ -219,6 +283,22 @@ def run_session(
     eur_usd: float = 1.08,
     veille_path: Path | None = None,
 ) -> SessionOutcome:
+    """Run one decision session and return what happened.
+
+    Gates run in this order: slot, slot already run, paused agent, daily token
+    budget, market clock. The order is not arbitrary: an exhausted budget or a
+    paused agent is still reported when the market is closed too, and the budget
+    is checked before the first LLM call because one checked afterwards has
+    already been spent.
+
+    `force=True` bypasses the clock and the window, never the deduplication: a
+    forced run records its slot key, so forcing twice in one day returns a skip
+    instead of placing a second set of orders.
+
+    `state` is mutated in place (tokens, slots, trades) and persisting it is the
+    caller's job, which keeps the gap between "order placed" and "state saved"
+    down to one call.
+    """
     now = now or datetime.now(UTC)
     state.roll_day(now.date())
     agent = state.agent_id
@@ -228,8 +308,8 @@ def run_session(
         outcome = SessionOutcome(
             agent, slot="hors-fenêtre", ran=False, reason="hors créneau ou jour non ouvré"
         )
-        # Journaliser aussi les refus : sans cette ligne, « n'a rien fait » et
-        # « n'a pas tourné » sont indistinguables dans les logs.
+        # Log the refusals too: without this line, "decided nothing" and "never
+        # ran" are indistinguishable in the logs.
         logger.log("session_skipped", agent=agent, slot=outcome.slot, reason=outcome.reason)
         return outcome
     slot, label = slot_info if slot_info else (f"{now.date().isoformat()}:force", "forcée")
@@ -258,8 +338,8 @@ def run_session(
         logger.log("session_skipped", agent=agent, slot=slot, reason=outcome.reason)
         return outcome
 
-    # Le budget est une contrainte de mesure, pas une décoration : un compte paper
-    # laissé à 100 000 $ rendrait toute performance en pourcentage absurde.
+    # The budget is a constraint on the measurement, not decoration: a paper
+    # account left at 100 000 $ would make any performance percentage absurd.
     capital_usd = round(capital_eur * eur_usd, 2)
     try:
         equity = broker.get_account().equity
@@ -270,8 +350,9 @@ def run_session(
     if state.starting_equity_usd is None:
         state.starting_equity_usd = equity
     if equity > capital_usd * 1.2:
-        # On ne bloque pas : le plafond d'exposition de l'exécuteur fait respecter le
-        # budget de 1 000 €. On garde la trace, parce que ça fausse la lecture des %.
+        # Not blocking: the executor's exposure cap is what enforces the 1 000 €
+        # budget. The trace is kept because a funded paper account flatters every
+        # percentage that is read from it later.
         logger.log(
             "capital_warning",
             agent=agent,
@@ -281,6 +362,8 @@ def run_session(
             note="compte paper au-dessus du budget : exposition plafonnée par le code",
         )
 
+    # The slot is part of the order prefix: the same agent retrying a slot gets
+    # the same ids, and a second slot cannot collide with the first.
     executor = ToolExecutor(
         broker, client_order_prefix=f"{agent}-{slot}", max_notional=capital_usd
     )
@@ -310,8 +393,14 @@ def run_session(
     completion: Completion | None = None
 
     for _ in range(max_turns):
+        # One turn per round: an agent that reads the price then decides needs at
+        # least two, and `max_turns` is what bounds the cost of a model that
+        # loops instead of answering.
         completion = client.complete(messages, tools=TOOLS, max_tokens=1200)
         tokens += completion.total_tokens
+        # Keep the last non-empty text: the turn that calls a tool usually
+        # carries no prose, and it would otherwise erase the reasoning of the
+        # turn before it.
         text = completion.text or text
         if not completion.tool_calls:
             break
@@ -323,6 +412,9 @@ def run_session(
                     {
                         "id": call.id,
                         "type": "function",
+                        # `raw_arguments`, not the parsed dict: the transcript has
+                        # to replay the exact string the model produced, or a
+                        # strict provider rejects the history on the next turn.
                         "function": {"name": call.name, "arguments": call.raw_arguments},
                     }
                     for call in completion.tool_calls
@@ -332,6 +424,9 @@ def run_session(
         for call in completion.tool_calls:
             tool_calls.append(call.name)
             payload = executor.dispatch(call.name, call.arguments)
+            # The payload is already a JSON string, and dispatch encodes every
+            # failure as {"error": ...}; a substring test avoids parsing it back
+            # just to count failures.
             if '"error"' in payload:
                 tool_failures += 1
             messages.append(
@@ -347,12 +442,18 @@ def run_session(
             "side": order["side"],
             "status": order["status"],
             "filled_avg_price": order["filled_avg_price"],
+            # One rationale per session, attached to every order it placed: the
+            # model justifies the decision, not each leg of it. Truncated to 400
+            # characters so a rambling answer cannot bloat the state and journal.
             "rationale": (text or "").strip()[:400],
         }
         orders.append(record)
         state.record_trade(record)
 
     state.record_call(tokens, tool_failures)
+    # Marked done only now: a crash during the turn loop leaves the slot unmarked
+    # so the session can be retried, and the client_order_id makes that retry
+    # safe rather than duplicating the orders.
     state.mark_slot_done(slot)
     state.prompt_version = PROMPT_VERSION
 
@@ -389,6 +490,16 @@ def run_session(
 def _self_critique(
     client: ChatClient, state: AgentState, broker: Broker, logger: JsonlLogger
 ) -> str:
+    """Ask the agent to review its last trades and store the resulting plan.
+
+    The plan is capped at 1 500 characters because it is re-injected at the top
+    of every following prompt: an unbounded plan would slowly eat the context
+    the market data needs.
+
+    The critique is sent with the default system prompt, not with the session's
+    capital figures: with a non-default capital, the amounts quoted here will not
+    match the ones the trades were made under.
+    """
     trades = "\n".join(
         f"- {item.get('ts')} {item.get('side')} {item.get('qty')} {item.get('symbol')} "
         f"(statut {item.get('status')}) — {item.get('rationale', '')}"
@@ -396,7 +507,7 @@ def _self_critique(
     )
     try:
         performance = build_portfolio_context(broker)
-    except BrokerError:  # pragma: no cover - défensif
+    except BrokerError:  # pragma: no cover - the builder already degrades internally
         performance = "(indisponible)"
     prompt = CRITIQUE_PROMPT.format(
         count=min(len(state.recent_trades), CRITIQUE_EVERY),
@@ -418,4 +529,5 @@ def _self_critique(
 
 
 def orders_as_json(orders: list[dict[str, Any]]) -> str:
+    """Readable JSON view of an order list, for post-mortem scripts."""
     return json.dumps(orders, ensure_ascii=False, indent=2)
